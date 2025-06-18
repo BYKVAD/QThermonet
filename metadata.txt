@@ -1,0 +1,34 @@
+[general]
+name=QThermonet (processing)
+qgisMinimumVersion=3.0
+description=This plugin enables dimensioning of thermonets in QGIS using pythermonet.
+version=0.1
+author=Jane Lund Andersen/VIA University College
+email=jana@via.dk
+
+about=This plugin serves as a user interface for the pythermonet 'Thermonet Dimensioning Tool' that dimensions the diameters of gridpipes in a thermonet as well as the length of Borehole Heat Exchangers (BHE's) or Horizontal Heat Exchangers (HHE's) supplying the grid. https://github.com/soeb1978/pythermonet. Disclaimer: The authors take no responsibility for the accuracy of results produced using this tool.
+
+license=mit
+tracker=https://github.com/jaluan/QThermonet/issues
+repository=https://github.com/jaluan/QThermonet
+
+hasProcessingProvider=yes
+
+# Uncomment the following line and add your changelog:
+# changelog=
+
+# Tags are comma separated with spaces allowed
+tags=python, energy, thermonet, heating network, cooling network, ground-source energy
+
+homepage=https://github.com/jaluan/QThermonet
+category=Analysis
+icon=icon.png
+
+# experimental flag
+experimental=True
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
+
+# If the plugin can run on QGIS Server.
+server=False
