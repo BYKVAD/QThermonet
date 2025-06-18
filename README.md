@@ -12,7 +12,7 @@ https://github.com/soeb1978/pythermonet  - Copyright (c) 2022 Søren Erbs Poulse
 The plugin requires the installation of pythermonet within the OSGeo4W shell: https://github.com/soeb1978/pythermonet
 Installation guidelines is provided in QThermonet_tutorial_1.pdf
 
-# Input/output
+# Getting started
 Description of the individual tools in the plugin, and guidelines for using the plugin is provided in QThermonet_tutorial_1.pdf
 
 # Disclaimer
