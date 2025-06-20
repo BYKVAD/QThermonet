@@ -45,7 +45,7 @@ from .PipeHierarchy_processing_algorithm import PipeHierarchyAlgorithm
 from .PipeTopology_processing_algorithm import PipeTopologyAlgorithm
 # from .QThermonet_processing_algorithm import QThermonetAlgorithm
 from .FullDimensioning_processing_algorithm import FullDimensioningAlgorithm
-from .Test_processing_algorithm import TestAlgorithm
+# from .Test_processing_algorithm import TestAlgorithm
 
 
 class QThermonetProvider(QgsProcessingProvider):
@@ -76,7 +76,7 @@ class QThermonetProvider(QgsProcessingProvider):
         self.addAlgorithm(PipeHierarchyAlgorithm())
         self.addAlgorithm(PipeTopologyAlgorithm())
         self.addAlgorithm(FullDimensioningAlgorithm())
-        self.addAlgorithm(TestAlgorithm())
+        # self.addAlgorithm(TestAlgorithm())
         # self.addAlgorithm(QThermonetAlgorithm())
     
     def id(self):
