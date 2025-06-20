@@ -2,7 +2,7 @@
 This plugin enables dimensioning of thermonets in QGIS using pythermonet.
 
 # Version
-v_0_1 is the first development version of the plugin intended for testing within the developer group.
+v0.1.x is the first development version of the plugin intended for testing within the developer group.
 
 # About
 This plugin serves as a user interface for the pythermonet 'Thermonet Dimensioning Tool' that dimensions 
