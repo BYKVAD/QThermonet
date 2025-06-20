@@ -15,7 +15,8 @@ The plugin requires the installation of pythermonet within the OSGeo4W shell: ht
 Installation guidelines is provided in QThermonet_tutorial_1.pdf
 
 # Getting started
-Description of the individual tools in the plugin, and guidelines for using the plugin is provided in QThermonet_tutorial_1.pdf
+Guidlines for installation, description of the individual tools in the plugin, and a small test example is provided in the [`Tutorial1/`](./Tutorial1/) folder.
+
 
 # Disclaimer
 The authors take no responsibility for the accuracy of results produced using this tool.  
