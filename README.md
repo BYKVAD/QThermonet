@@ -1,27 +1,28 @@
 # QThermonet
 This plugin enables dimensioning of thermonets in QGIS using pythermonet.
 
-# Version
+## Version
 v0.1.x is the first development version of the plugin intended for testing within the developer group.
 
-# About
+## About
 This plugin serves as a user interface for the pythermonet 'Thermonet Dimensioning Tool' that dimensions 
 the diameters of gridpipes in a thermonet as well as the length of Borehole Heat Exchangers (BHE's) or 
 Horizontal Heat Exchangers (HHE's) supplying the grid.  
 https://github.com/soeb1978/pythermonet
 
-# Dependencies
+## Dependencies
 The plugin requires the installation of pythermonet within the OSGeo4W shell: https://github.com/soeb1978/pythermonet  
 Installation guidelines is provided in QThermonet_tutorial_1.pdf
 
-# Getting started
+## Getting started
 Guidlines for installation, description of the individual tools in the plugin, and a small test example is provided in the [`Tutorial1/`](./Tutorial1/) folder.
 
-
-# Disclaimer
+## Disclaimer
 The authors take no responsibility for the accuracy of results produced using this tool.  
 The plugin has been tested on a Windows 11 OS using QGIS 3.34.15 and has not yet been tested with other setups.  
 The current plugin is primarily designed to handle thermonet and heatload calculations in Denmark, future versions are expected to expand functionality to other geographical areas.
 
+## Plugin Workflow
+![Workflow diagram](./Tutorial1/QThermonet-workflow.png)
 
 
