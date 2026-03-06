@@ -31,38 +31,13 @@ __copyright__ = '(C) 2026 by Jane Lund Andersen/VIA University College'
 __revision__ = '$Format:%H$'
 
 import os
-from qgis import processing
-import inspect
 import requests as rq
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.PyQt.QtCore import QCoreApplication
-from qgis.core import (
-    edit,
-    QgsCategorizedSymbolRenderer,
-    QgsCoordinateReferenceSystem, 
-    QgsCoordinateTransform, 
-    QgsExpression,
-    QgsExpressionContext,
-    QgsExpressionContextUtils,
-    QgsFeature,
-    QgsField,
-    QgsLineSymbol,
-    QgsProcessing,
-    QgsProcessingAlgorithm,
-    QgsProcessingException,
-    QgsProcessingParameterBoolean,
-    QgsProcessingParameterDefinition,
-    QgsProcessingParameterFeatureSource,
-    QgsProcessingParameterFileDestination,
-    QgsProcessingParameterString,
-    QgsProject,
-    QgsRendererCategory,
-    QgsSingleSymbolRenderer,
-    QgsSymbol,
-    QgsVectorFileWriter,
-    QgsVectorLayer,
-    QgsWkbTypes
-    )
 from PyQt5.QtCore import QVariant
 
 
@@ -86,12 +61,25 @@ class GetGroundConductivity(QgsProcessingAlgorithm):
             "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
         )
         self.addParameter(param)
+
+        # 2nd input (make default value of 150 m)
+        param = QgsProcessingParameterFeatureSource(
+                self.DEPTH,
+                "Depth in meters"
+            )
+        param.setHelp(
+            "- The depth defines the depth of averaging for the ground thermal conductivity. \n"
+            "- It is defined from the ground surface with positive values downwards"
+        )
+        self.addParameter(param)
   
 
         
     def processAlgorithm(self, parameters, context, feedback):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
-        
+        # input_depth = self.parameterAsNumber(parameters, self.DEPTH, context) # check parameterAs?
+        depth = 100 #Hardcoded for now
+	output_dir = "." #hardcoded for now
         
         # Check input AOI layer
         feedback.pushInfo("Checking input layer ...")
@@ -111,7 +99,181 @@ class GetGroundConductivity(QgsProcessingAlgorithm):
             raise QgsProcessingException("The input feature geometry has errors!")
 
         
-        # Step 1: 
+        # Step 1: Calculate the center coordinates of the AOI input (EPSG:25832?)
+	centerX = 520000 #dummy for now
+	centerY = 6200000 #dummy for now
+
+	# Step 2: Create the url for the API call
+	base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
+	#x=520000&y=6200000
+	params = {
+    		"x": centerX,
+    		"y": centerY,
+    		"crs": "EPSG:25832"
+	}
+
+	# Step 3: Request data from the api and check whether it was succesful
+	response = requests.get(url, params=params)
+
+	if response.status_code == 200:
+
+    		data = response.json()
+    		print("Ground level:", data["groundlevel"])
+    		print("Avg thermal conductivity:", data["tc_avg_0m_150m"])
+    		for aquifer in data["aquifers"]:
+        		print(f"Aquifer {aquifer['magasin_id']}: "
+              			f"top={aquifer['top']}m, thickness={aquifer['thickness']}m")
+    		for layer in data["layers"]:
+        		print(f"{layer['name']}: {layer['top']}m to {layer['bottom']}m")
+
+	else:
+    		print(f"Request failed with status code: {response.status_code}")
+
+
+
+	# Step 4: Unpack the json data structure and create a figure of the local geology
+	# Check layer depths/bottoms - relative to groundlevel?
+
+	layers      = data["layers"]
+	groundlevel = data["groundlevel"]
+	phreatic = data["phreatic"]
+
+	# Define colors (random for now, later use GEUS standard colors)
+	unique_names = list({layer["name"] for layer in layers})
+	cmap         = plt.get_cmap("tab20", len(unique_names))
+	colour_map   = {name: cmap(i) for i, name in enumerate(unique_names)}
+	
+	# axis limits
+	all_tops    = [l["top"]    for l in layers]
+	all_bottoms = [l["bottom"] for l in layers]
+
+	# Initiate figure
+	fig, (ax_a, ax_b) = plt.subplots(
+    	1, 2,
+    	figsize       = (10, 9),
+    	gridspec_kw   = {"wspace": 0.45},
+	)
+	fig.suptitle(
+    	f"Geological Depth Profile  |  X={centerX}, Y={centerY}",
+    	fontsize=11, fontweight="bold", y=0.98,
+	)
+
+	# Fig. 1A: Full geological profile
+	full_top    = groundlevel
+	full_bottom = min(all_bottoms)
+	margin      = (full_top - full_bottom) * 0.02   # small visual padding
+	self.draw_panel(
+    	ax_a, layers, groundlevel,
+    	y_min_elev = full_bottom - margin,
+    	y_max_elev = full_top    + margin,
+    	title      = "Panel A – Full profile",
+	feedback
+	)
+	
+	# Fig. 1B: Zoom-in on geology down to depth that came with user input
+	panel_b_top    = groundlevel                  # surface elevation
+	panel_b_bottom = groundlevel - depth          # depth metres below surface
+	self.draw_panel(
+    	ax_b, layers, groundlevel,
+    	y_min_elev = panel_b_bottom,
+    	y_max_elev = panel_b_top,
+    	title      = f"Panel B – Upper {depth} m below ground",
+	feedback
+	)
+
+	# legend
+	patches = [
+    	mpatches.Patch(color=colour_map[name], label=name)
+    	for name in sorted(unique_names)
+	]
+	fig.legend(
+   	 handles   = patches,
+    	title     = "Geological units",
+   	 loc       = "lower center",
+    	ncol      = 3,
+    	fontsize  = 7,
+    	title_fontsize = 8,
+    	bbox_to_anchor = (0.5, 0.0),
+    	framealpha = 0.8,
+	)
+	fig.subplots_adjust(bottom=0.22)   # make room for the legend
+
+	#Save figure
+	os.makedirs(output_dir, exist_ok=True)
+	out_path = os.path.join(output_dir, f"subsurface_{centerX}_{centerY}.png")
+	fig.savefig(out_path, dpi=150, bbox_inches="tight")
+	print(f"Figure saved to: {out_path}")
+	plt.show()
+
+	# Step 5: Calculate ground thermal conductivity based on json output
+	tc_depthavg = data["tc_avg_0m_150m"] #Using default averaging to 150 m for now
+	
+	#Loop through layers
+	#Find layers with top < depth (take care wrt absolute values as above-ground is negative)
+	#If bottom < depth --> Fully within depth, weight = 1 (or actually scaling with thickness)
+	#If bottom > depth --> Calculate weight as layer thickness within depth
+	#If top < phreatic --> use tc_corrected_for_phreatic (or this should be default)
+	#Create weighted average depending on weights and depths
+	#Return this value to user (in report with profile)
+	#calculate 'sensitivity' by performing the same analysis in 10 neighbouring "cells" (e.g. 20-100 meter from center coordinates)
+	# Return value +- deviation plus a warning with method limitations
+
+
+# sub-functions, to be called with self. before name of function in the above
+def draw_panel(self, ax, layers, groundlevel, y_min_elev, y_max_elev, title, feedback):
+    """
+    Draw geological layers as horizontal bars on `ax`.
+
+    Parameters
+    ----------
+    y_min_elev, y_max_elev : elevation limits for the y-axis (m a.s.l.)
+    """
+    for layer in layers:
+        top    = layer["top"]      # elevation of top    (m a.s.l.)
+        bottom = layer["bottom"]   # elevation of bottom (m a.s.l.)
+
+        # Skip layers entirely outside the visible window
+        if top < y_min_elev or bottom > y_max_elev:
+            continue
+
+        # Clip to the visible window
+        plot_top    = min(top,    y_max_elev)
+        plot_bottom = max(bottom, y_min_elev)
+
+        colour = colour_map[layer["name"]]
+        ax.barh(
+            y      = (plot_top + plot_bottom) / 2,   # bar centre
+            width  = 1,
+            height = plot_top - plot_bottom,
+            color  = colour,
+            edgecolor = "white",
+            linewidth = 0.4,
+            align  = "center",
+        )
+
+        # Label if the visible portion is tall enough
+        if (plot_top - plot_bottom) > (y_max_elev - y_min_elev) * 0.03:
+            ax.text(
+                0.5, (plot_top + plot_bottom) / 2,
+                layer["name"],
+                ha="center", va="center",
+                fontsize=7, color="black",
+                clip_on=True,
+            )
+
+    # Ground-level reference line
+    if y_min_elev <= groundlevel <= y_max_elev:
+        ax.axhline(groundlevel, color="saddlebrown", linewidth=1.2,
+                   linestyle="--", label=f"Ground level ({groundlevel:.1f} m)")
+        ax.legend(fontsize=7, loc="lower right")
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(y_min_elev, y_max_elev)
+    ax.set_xticks([])
+    ax.set_ylabel("Elevation (m a.s.l.)", fontsize=8)
+    ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.yaxis.set_tick_params(labelsize=8)
+    ax.invert_yaxis()   # top of profile at the top of the plot
 
 
     def name(self):
