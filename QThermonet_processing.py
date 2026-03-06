@@ -139,6 +139,16 @@ class QThermonetPlugin(object):
         self.iface.addPluginToMenu(u"&QThermonet", self.action_service_pipes)
         self.menu.addAction(self.action_service_pipes)
         self.plugin_actions.append(self.action_service_pipes)
+
+        # Tool: Get ground conductivity
+        icon_service_pipes = os.path.join(cmd_folder, 'logo-thermalcond.png')
+        self.action_ground_conductivity = QAction(
+            QIcon(icon_service_pipes),
+            u"Get ground conductivity", self.iface.mainWindow())
+        self.action_ground_conductivity.triggered.connect(self.run_GetGroundConductivity)
+        self.iface.addPluginToMenu(u"&QThermonet", self.action_ground_conductivity)
+        self.menu.addAction(self.action_ground_conductivitys)
+        self.plugin_actions.append(self.action_ground_conductivity)
         
         # Tool: Pipe topology
         icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
@@ -205,7 +215,10 @@ class QThermonetPlugin(object):
         
         self.iface.removePluginMenu(u"&QThermonet", self.action_service_pipes)
         self.iface.removeToolBarIcon(self.action_service_pipes)
-        
+                
+        self.iface.removePluginMenu(u"&QThermonet", self.action_ground_conductivity)
+        self.iface.removeToolBarIcon(self.action_ground_conductivity)
+
         self.iface.removePluginMenu(u"&QThermonet", self.action_pipe_topology)
         self.iface.removeToolBarIcon(self.action_pipe_topology)
         
@@ -243,6 +256,9 @@ class QThermonetPlugin(object):
     def run_ShortestServicePipes(self):
         processing.execAlgorithmDialog("QThermonet:Shortest Service Pipes")
         
+    def run_GetGroundConductivity(self):
+        processing.execAlgorithmDialog("QThermonet:Get ground conductivity")
+
     def run_PipeTopology(self):
         processing.execAlgorithmDialog("QThermonet:Pipe Topology")
                 
