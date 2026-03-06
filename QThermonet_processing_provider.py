@@ -42,6 +42,7 @@ from .ToggleThermonet_processing_algorithm import ToggleThermonetAlgorithm
 # from .AggregatedLoad_processing_algorithm import AggregatedLoadAlgorithm
 from .ServicePipes_processing_algorithm import ServicePipesAlgorithm
 from .PipeHierarchy_processing_algorithm import PipeHierarchyAlgorithm
+from .GetGroundConductivity_processing_algorithm import GetGroundConductivityAlgorithm
 from .PipeTopology_processing_algorithm import PipeTopologyAlgorithm
 # from .QThermonet_processing_algorithm import QThermonetAlgorithm
 from .FullDimensioning_processing_algorithm import FullDimensioningAlgorithm
@@ -73,7 +74,8 @@ class QThermonetProvider(QgsProcessingProvider):
         self.addAlgorithm(LoadCalculationAlgorithm())
         # self.addAlgorithm(AggregatedLoadAlgorithm())
         self.addAlgorithm(ServicePipesAlgorithm())
-        self.addAlgorithm(PipeHierarchyAlgorithm())
+        self.addAlgorithm(PipeHierarchyAlgorithm())        
+	self.addAlgorithm(GetGroundConductivityAlgorithm())
         self.addAlgorithm(PipeTopologyAlgorithm())
         self.addAlgorithm(FullDimensioningAlgorithm())
         # self.addAlgorithm(TestAlgorithm())
