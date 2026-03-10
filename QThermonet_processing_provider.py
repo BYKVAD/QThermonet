@@ -75,7 +75,7 @@ class QThermonetProvider(QgsProcessingProvider):
         # self.addAlgorithm(AggregatedLoadAlgorithm())
         self.addAlgorithm(ServicePipesAlgorithm())
         self.addAlgorithm(PipeHierarchyAlgorithm())        
-	self.addAlgorithm(GetGroundConductivityAlgorithm())
+        self.addAlgorithm(GetGroundConductivityAlgorithm())
         self.addAlgorithm(PipeTopologyAlgorithm())
         self.addAlgorithm(FullDimensioningAlgorithm())
         # self.addAlgorithm(TestAlgorithm())
