@@ -41,12 +41,15 @@ from qgis.PyQt.QtGui import QIcon #, QColor
 from qgis.PyQt.QtCore import QCoreApplication
 # from PyQt5.QtCore import QVariant
 from qgis.core import (
+    QgsCoordinateTransform,
+    QgsCoordinateReferenceSystem,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterFolderDestination,
+    QgsProject,
     QgsVectorLayer,
     QgsWkbTypes
     )
@@ -123,12 +126,26 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
 
         
         # Step 1: Calculate the center coordinates of the AOI input (EPSG:25832?)
-        centerX = 520000 #dummy for now
-        centerY = 6200000 #dummy for now
+        geometry = feature.geometry()
+        
+        # Reproject to EPSG:25832 (Danish UTM) if the layer is in a different CRS
+        source_crs = input_area_layer.crs()
+        target_crs = QgsCoordinateReferenceSystem("EPSG:25832")
+        
+        if source_crs != target_crs:
+            transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
+            geometry.transform(transform)
+            feedback.pushInfo(f"Reprojected layer from {source_crs.authid()} to EPSG:25832")
+        
+        # Calculate centroid
+        centroid = geometry.centroid().asPoint()
+        centerX  = round(centroid.x())
+        centerY  = round(centroid.y())
+        
+        feedback.pushInfo(f"Centroid coordinates (EPSG:25832): X={centerX}, Y={centerY}")
         
         # Step 2: Create the url for the API call
         base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
-        #x=520000&y=6200000
         params = {
            		"x": centerX,
            		"y": centerY,
@@ -169,7 +186,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
        	# Initiate figure
        	fig, (ax_a, ax_b) = plt.subplots(
            	1, 2,
-           	figsize       = (10, 9),
+           	figsize       = (10, 11),
            	gridspec_kw   = {"wspace": 0.45},
        	)
        	fig.suptitle(
@@ -177,45 +194,49 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
            	fontsize=11, fontweight="bold", y=0.98,
        	)
        
+        
        	# Fig. 1A: Full geological profile
-       	full_top    = groundlevel
-       	full_bottom = min(all_bottoms)
-       	margin      = (full_top - full_bottom) * 0.02   # small visual padding
+       	full_top    = -groundlevel
+       	full_bottom = max(l["bottom"] for l in layers)
+       	#margin      = (full_top - full_bottom) * 0.02   # small visual padding
        	self.draw_panel(
            	ax_a, layers, groundlevel, colour_map,
-           	y_min_elev = full_bottom - margin,
-           	y_max_elev = full_top    + margin,
+           	y_min_elev = full_top, #- margin,
+           	y_max_elev = full_bottom,    #+ margin,
            	title      = "Panel A – Full profile", 
-             feedback   = feedback
+            feedback   = feedback
              )
     	
        	# Fig. 1B: Zoom-in on geology down to depth that came with user input
-       	panel_b_top    = groundlevel                  # surface elevation
-       	panel_b_bottom = groundlevel - input_depth          # depth metres below surface
+       	panel_b_top    = -groundlevel                  # surface elevation
+       	panel_b_bottom = -groundlevel + input_depth    # depth metres below surface
        	self.draw_panel(
            	ax_b, layers, groundlevel, colour_map,
-           	y_min_elev = panel_b_bottom,
-           	y_max_elev = panel_b_top,
+           	y_min_elev = panel_b_top,
+           	y_max_elev = panel_b_bottom,
            	title      = f"Panel B – Upper {input_depth} m below ground",
-             feedback   = feedback
+            feedback   = feedback
        	)
        
        	# legend
-       	patches = [
-           	mpatches.Patch(color=colour_map[name], label=name)
-           	for name in sorted(unique_names)
-       	]
-       	fig.legend(
-          	 handles   = patches,
-           	title     = "Geological units",
-          	 loc       = "lower center",
-           	ncol      = 3,
-           	fontsize  = 7,
-           	title_fontsize = 8,
-           	bbox_to_anchor = (0.5, 0.0),
-           	framealpha = 0.8,
-       	)
-       	fig.subplots_adjust(bottom=0.22)   # make room for the legend
+       	# Sort unique names by their top value (shallowest first)
+        sorted_names = sorted(unique_names, key=lambda name: next(l["top"] for l in layers if l["name"] == name))
+        
+        patches = [
+            mpatches.Patch(color=colour_map[name], label=name)
+            for name in sorted_names
+        ]
+        fig.legend(
+            handles        = patches,
+            title          = "Geological units",
+            loc            = "lower center",
+            ncol           = 3,
+            fontsize       = 7,
+            title_fontsize = 8,
+            bbox_to_anchor = (0.5, 0.0),
+            framealpha     = 0.8,
+        )
+       	fig.subplots_adjust(bottom=0.18)   # make room for the legend
        
        	#Save figure
        	os.makedirs(output_folder, exist_ok=True)
@@ -223,59 +244,79 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
        	fig.savefig(out_path, dpi=150, bbox_inches="tight")
        	feedback.pushInfo(f"Figure saved to: {out_path}")
        
-       	# Step 5: Calculate ground thermal conductivity based on json output
+       	# Step 5: Calculate ground thermal conductivity based on json output           
         if input_depth == 150:
-           	tc_depthavg = data["tc_avg_0m_150m"] #Using default averaging of 150 m
+            tc_depthavg = data["tc_avg_0m_150m"]
+            feedback.pushInfo(f"Average thermal conductivity 0-{input_depth} m: {tc_depthavg:.3f} W/m·K (direct API output)")
         else:
-            tc_depthavg = 0    	
+            tc_weighted_sum = 0
+            total_thickness = 0
         
-        #Loop through layers
-       	#Find layers with top < depth (take care wrt absolute values as above-ground is negative)
-       	#If bottom < depth --> Fully within depth, weight = 1 (or actually scaling with thickness)
-       	#If bottom > depth --> Calculate weight as layer thickness within depth
-       	#If top < phreatic --> use tc_corrected_for_phreatic (or this should be default)
-       	#Create weighted average depending on weights and depths
-       	#Return this value to user (in report with profile)
+            for layer in layers:
+                layer_top    = layer["top"]    - (-groundlevel)
+                layer_bottom = layer["bottom"] - (-groundlevel)  
+            
+                # Skip layers entirely above the surface or below input_depth
+                if layer_bottom <= 0 or layer_top >= input_depth:
+                    continue
+            
+                # Clip to the interval [0, input_depth]
+                clipped_top    = max(layer_top,    0)  # don't count above-surface portion
+                clipped_bottom = min(layer_bottom, input_depth)
+            
+                thickness_within_depth = clipped_bottom - clipped_top
+                #feedback.pushInfo(f"Layer: {layer['name']} | layer_top={layer_top:.2f}, layer_bottom={layer_bottom:.2f}, clipped_top={clipped_top:.2f}, clipped_bottom={clipped_bottom:.2f}, thickness={thickness_within_depth:.2f}")
+            
+                if thickness_within_depth > 0:
+                    tc_weighted_sum += layer["tc_corrected_for_phreatic"] * thickness_within_depth
+                    total_thickness += thickness_within_depth
+                
+            if total_thickness > 0:
+                tc_depthavg = tc_weighted_sum / total_thickness
+            else:
+                tc_depthavg = 0
+                feedback.pushInfo(f"Warning: no layers found within {input_depth} m depth interval")
+        
+            feedback.pushInfo(f"Average thermal conductivity 0-{input_depth} m: {tc_depthavg:.3f} W/m·K")
+            feedback.pushInfo(f"Total layer thickness within depth interval: {total_thickness:.1f} m (data gap: {input_depth - total_thickness:.1f} m)")
+        
+        #Bonus
        	#calculate 'sensitivity' by performing the same analysis in 10 neighbouring "cells" (e.g. 20-100 meter from center coordinates)
        	# Return value +- deviation plus a warning with method limitations
-        feedback.pushInfo(f"Average thermal conductivity 0-150m: {tc_depthavg}")
-        
         return {}
 
+
     # sub-functions, to be called with self. before name of function in the above
-    def draw_panel(self, ax, layers, groundlevel, colour_map, y_min_elev, y_max_elev, title, feedback):
-        """
-        Draw geological layers as horizontal bars on `ax`.
+    def draw_panel(self, ax, layers, groundlevel, colour_map, y_min_elev, y_max_elev, title, feedback=None):
+
+        sorted_layers = sorted(layers, key=lambda l: l["top"])
     
-        Parameters
-        ----------
-        y_min_elev, y_max_elev : elevation limits for the y-axis (m a.s.l.)
-        """
-        for layer in layers:
-            top    = layer["top"]      # elevation of top    (m a.s.l.)
-            bottom = layer["bottom"]   # elevation of bottom (m a.s.l.)
-    
+        for layer in sorted_layers:
+            top    = layer["top"]      # smaller = shallower
+            bottom = layer["bottom"]   # larger  = deeper
+            feedback.pushInfo(f"Layer: {layer['name']} | top={top}, bottom={bottom}")
             # Skip layers entirely outside the visible window
-            if top < y_min_elev or bottom > y_max_elev:
+            if top > y_max_elev or bottom < y_min_elev:
+                feedback.pushInfo(f"  --> SKIPPED (outside window)")
                 continue
     
-            # Clip to the visible window
-            plot_top    = min(top,    y_max_elev)
-            plot_bottom = max(bottom, y_min_elev)
+            # Clip to visible window
+            plot_top    = max(top,    y_min_elev)
+            plot_bottom = min(bottom, y_max_elev)
+            feedback.pushInfo(f"  --> PLOTTING: plot_top={plot_top}, plot_bottom={plot_bottom}, height={plot_bottom - plot_top}")
     
             colour = colour_map[layer["name"]]
             ax.barh(
-                y      = (plot_top + plot_bottom) / 2,   # bar centre
+                y      = (plot_top + plot_bottom) / 2,
                 width  = 1,
-                height = plot_top - plot_bottom,
+                height = plot_bottom - plot_top,   # always positive now
                 color  = colour,
                 edgecolor = "white",
                 linewidth = 0.4,
                 align  = "center",
             )
     
-            # Label if the visible portion is tall enough
-            if (plot_top - plot_bottom) > (y_max_elev - y_min_elev) * 0.03:
+            if (plot_bottom - plot_top) > (y_max_elev - y_min_elev) * 0.03:
                 ax.text(
                     0.5, (plot_top + plot_bottom) / 2,
                     layer["name"],
@@ -284,19 +325,13 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
                     clip_on=True,
                 )
     
-        # Ground-level reference line
-        if y_min_elev <= groundlevel <= y_max_elev:
-            ax.axhline(groundlevel, color="saddlebrown", linewidth=1.2,
-                       linestyle="--", label=f"Ground level ({groundlevel:.1f} m)")
-            ax.legend(fontsize=7, loc="lower right")
-    
         ax.set_xlim(0, 1)
-        ax.set_ylim(y_min_elev, y_max_elev)
+        ax.set_ylim(y_min_elev, y_max_elev)  
+        ax.invert_yaxis()                     
         ax.set_xticks([])
-        ax.set_ylabel("Elevation (m a.s.l.)", fontsize=8)
+        ax.set_ylabel("Depth (m)", fontsize=8)
         ax.set_title(title, fontsize=9, fontweight="bold")
         ax.yaxis.set_tick_params(labelsize=8)
-        ax.invert_yaxis()   # top of profile at the top of the plot
 
 
     def name(self):
@@ -347,9 +382,9 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         """
         return (
             "<p><b> This tool: </b> <p>"
-            "<p> 1.Retrieves the ground conductivity within the input AOI polygon to the selected depth "
-            "The ground conductivity depends on the local geology and the water content and is found by "
-	" an API call to the tool developed by GEUS (REFERENCE). <p> "
+            "<p> 1.Returns the ground thermal conductivity at the centroid of the input AOI polygon to the input depth "
+            "The ground thermal conductivity depends on the local geology and the water content and is found by "
+            "an API call to the tool developed by GEUS (REFERENCE). <p> "
                )
     
     def createInstance(self):
