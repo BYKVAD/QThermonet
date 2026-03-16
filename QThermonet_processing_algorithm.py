@@ -32,6 +32,7 @@ __revision__ = '$Format:%H$'
 
 import os
 import inspect
+from . import utils
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
@@ -279,9 +280,9 @@ class QThermonetAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo.png')))
-        return icon
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo.png')))
+        return QIcon(utils.get_resource('logo.png'))
     
     def shortHelpString(self):
         """

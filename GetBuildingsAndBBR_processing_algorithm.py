@@ -34,6 +34,7 @@ import os
 from qgis import processing
 import inspect
 import requests as rq
+from . import utils
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
