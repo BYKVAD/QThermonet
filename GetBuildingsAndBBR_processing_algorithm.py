@@ -571,7 +571,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 response = rq.get(url=bbr_url, params=params)
                 data = response.json()
                 for x in data:
-                    BuildYear_value = x['byg026Opførelsesår']
+                    BuildYear_value = x.get('byg026Opførelsesår', 0)
                     BuildCode_value = x['byg021BygningensAnvendelse']
                     BuildArea_value = x.get('byg038SamletBygningsareal', 0)
                     feedback.pushInfo(
