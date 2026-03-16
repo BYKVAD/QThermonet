@@ -33,6 +33,7 @@ __revision__ = '$Format:%H$'
 import os
 import sys
 import inspect
+from . import utils
 
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
@@ -81,7 +82,8 @@ class QThermonetPlugin(object):
         # self.plugin_actions.append(self.action_tests)
         
         # Tool: Get buildings in AOI
-        icon_get_buildings = os.path.join(cmd_folder, 'logo2.png')
+        icon_get_buildings = utils.get_resource('logo2.png')
+        # icon_get_buildings = os.path.join(cmd_folder, 'logo2.png')
         self.action_get_buildings = QAction(
             QIcon(icon_get_buildings),
             u"Get buildings and BBR information", self.iface.mainWindow())
@@ -91,7 +93,8 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_get_buildings)
         
         # Tool: Toggle Thermonet
-        icon_toggle_thermonet = os.path.join(cmd_folder, 'logo2a.png')
+        icon_toggle_thermonet = utils.get_resource('logo2a.png')
+        # icon_toggle_thermonet = os.path.join(cmd_folder, 'logo2a.png')
         self.action_toggle_thermonet = QAction(
             QIcon(icon_toggle_thermonet),
             u"Optional: Toggle thermonet buildings", self.iface.mainWindow())
@@ -101,7 +104,8 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_toggle_thermonet)
         
         # Tool: Calculate heat loads
-        icon_load_calculation = os.path.join(cmd_folder, 'logo2b.png')
+        icon_load_calculation = utils.get_resource('logo2b.png')
+        # icon_load_calculation = os.path.join(cmd_folder, 'logo2b.png')
         self.action_load_calculation = QAction(
             QIcon(icon_load_calculation),
             u"Calculate heatloads", self.iface.mainWindow())
@@ -121,7 +125,8 @@ class QThermonetPlugin(object):
         # self.plugin_actions.append(self.action_aggregated_load)
         
         # Tool: Pipe hierarchy
-        icon_pipe_hierarchy = os.path.join(cmd_folder, 'logo6-pipes-simple.png')
+        icon_pipe_hierarchy = utils.get_resource('logo6-pipes-simple.png')
+        # icon_pipe_hierarchy = os.path.join(cmd_folder, 'logo6-pipes-simple.png')
         self.action_pipe_hierarchy = QAction(
             QIcon(icon_pipe_hierarchy),
             u"Optional: Pipe hierarchy", self.iface.mainWindow())
@@ -131,7 +136,8 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_pipe_hierarchy)
         
         # Tool: Service pipes
-        icon_service_pipes = os.path.join(cmd_folder, 'logo-servicep.png')
+        icon_service_pipes = utils.get_resource('logo-servicep.png')
+        # icon_service_pipes = os.path.join(cmd_folder, 'logo-servicep.png')
         self.action_service_pipes = QAction(
             QIcon(icon_service_pipes),
             u"Shortest service pipes", self.iface.mainWindow())
@@ -141,7 +147,8 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_service_pipes)
         
         # Tool: Pipe topology
-        icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
+        icon_pipe_topology = utils.get_resource('logo6-pipes-alt.png')
+        # icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
         self.action_pipe_topology = QAction(
             QIcon(icon_pipe_topology),
             u"Pipe topology", self.iface.mainWindow())
@@ -151,7 +158,8 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_pipe_topology)
         
         # Tool: Full dimensioning
-        icon_full_dimensioning = os.path.join(cmd_folder, 'logo.png')
+        icon_full_dimensioning = utils.get_resource('logo.png')
+        # icon_full_dimensioning = os.path.join(cmd_folder, 'logo.png')
         self.action_full_dimensioning = QAction(
             QIcon(icon_full_dimensioning),
             u"Full_dimensioning", self.iface.mainWindow())
