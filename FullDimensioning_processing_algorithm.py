@@ -35,11 +35,15 @@ import inspect
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
-from qgis.core import (QgsProcessingAlgorithm,
+from qgis.core import (QgsProcessing,
+                       QgsProcessingAlgorithm,
                        QgsProcessingException,
+                       QgsProcessingParameterDefinition,
                        QgsProcessingParameterEnum,
+                       QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterNumber,
                        QgsProcessingParameterString)
 
 from pythermonet.data.equipment.pipes import load_pipe_catalogue
@@ -50,6 +54,7 @@ from pythermonet.io import (
 )
 from pythermonet.core.main import run_full_dimensioning
 from pythermonet.domain import BHEConfig, HHEConfig, Brine, HeatPump, Thermonet
+from .utils import calculate_tc, get_representative_point
 
 
 class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
@@ -118,6 +123,48 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(param)
         
+        # Ground thermal conductivity method selection
+        param = QgsProcessingParameterEnum(
+            'TC_METHOD',
+            '── THERMAL CONDUCTIVITY ── Method',
+            options = ['Calculate from geology (GEUS API)', 'Enter manually'],
+            defaultValue = 1
+        )
+        param.setHelp(
+            '───────────────────────────────────────────────\n'
+            'GROUND THERMAL CONDUCTIVITY SETTINGS\n'
+            '───────────────────────────────────────────────\n'
+            'Choose whether to calculate ground thermal conductivity '
+            'from the GEUS API or enter a value manually.'
+        )
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
+        self.addParameter(param)
+        
+        # Manual input value - optional, only used if method = manual
+        param = QgsProcessingParameterNumber(
+            'TC_MANUAL',
+            '── THERMAL CONDUCTIVITY ── Manual value (W/m·K)',
+            type         = QgsProcessingParameterNumber.Double,
+            defaultValue = 2.0,
+            minValue     = 0.1,
+            maxValue     = 10.0,
+            optional     = True
+        )
+        param.setHelp('Only used if "Enter manually" is selected above. Typical values range from 1.5 to 3.5 W/m·K.')
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
+        self.addParameter(param)
+        
+        param = QgsProcessingParameterFeatureSource(
+            'TC_AOI',
+            '── THERMAL CONDUCTIVITY ── AOI (polygon, line or point)',
+            [QgsProcessing.TypeVectorPolygon,
+             QgsProcessing.TypeVectorLine,
+             QgsProcessing.TypeVectorPoint],
+            optional = True
+        )
+        param.setHelp('Only used if "Calculate from geology (GEUS API)" is selected. Must contain a single feature.')
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
+        self.addParameter(param)
         
         # # Input file containing brine information
         # self.addParameter(
@@ -200,6 +247,43 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         TOPO_file = self.parameterAsFile(parameters, self.INPUT_Topology, context)
         if not TOPO_file:
             raise QgsProcessingException("Invalid topology input file!")
+            
+        # Retrieve TC method and calculate or retrieve manual value
+        tc_method = self.parameterAsEnum(parameters, 'TC_METHOD', context)
+        
+        if tc_method == 0:
+            #initial depth estimate
+            if he_mode_index == 0:  #BHE
+                depth = 200         #meter, hardcoded for now, later adjust depth with BHE depth
+            else:                   #HHE
+                depth = 2           #meter, hardcoded for now, later adjust depth with HHE depth
+            
+            # Get AOI layer and extract coordinates
+            tc_aoi = self.parameterAsVectorLayer(parameters, 'TC_AOI', context)
+            if tc_aoi is None:
+                raise QgsProcessingException(
+                    "An AOI layer must be provided when using the GEUS API method!"
+                )
+            try:
+                centerX, centerY = get_representative_point(tc_aoi)
+                feedback.pushInfo(f"Coordinates (EPSG:25832): X={centerX}, Y={centerY}")
+            except ValueError as e:
+                raise QgsProcessingException(str(e))
+
+            # Calculate from GEUS API
+            feedback.pushInfo("Calculating ground thermal conductivity from GEUS API ...")
+            tc = calculate_tc(centerX, centerY, depth) #centerX, centerY, input_depth
+            if tc is not None:
+                feedback.pushInfo(f"Ground thermal conductivity: {tc:.2f} W/m·K")
+            else:
+                raise QgsProcessingException(
+                    "Could not retrieve ground thermal conductivity from the GEUS API. "
+                    "Check that the AOI is within Denmark and try again."
+                )
+        else:
+            # Use manually entered value
+            tc = self.parameterAsDouble(parameters, 'TC_MANUAL', context)
+            feedback.pushInfo(f"Ground thermal conductivity (manual input): {tc:.2f} W/m·K")
                         
         # Handle pipe catalogue file
         feedback.pushInfo("Handling pipe file...")
@@ -219,8 +303,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         net = Thermonet(
             D_gridpipes=0.3,
             l_p=0.4,
-            l_s_H=1.25,
-            l_s_C=1.25,
+            l_s_H=tc, #1.25, Thermal conductivity from GEUS API call, not tested
+            l_s_C=tc, #1.25, Thermal conductivity from GEUS API call, not tested
             rhoc_s=2.5e6,
             z_grid=1.2,
             T0=9.03,
@@ -252,7 +336,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         he_mode = ["BHE", "HHE"][he_mode_index]
         if he_mode == "BHE":
             feedback.pushInfo("Performing BHE configuration...")
-            source_config = BHEConfig(q_geo = 0.0185, r_b=0.152/2, r_p=0.02, SDR=11, l_ss=2.36, rhoc_ss=2.65e6, l_g=1.75, rhoc_g=3e6, D_pipes=0.015, NX=1, D_x=15, NY=6, D_y=15, gFuncMethod='ICS')
+            # source_config = BHEConfig(q_geo = 0.0185, r_b=0.152/2, r_p=0.02, SDR=11, l_ss=2.36, rhoc_ss=2.65e6, l_g=1.75, rhoc_g=3e6, D_pipes=0.015, NX=1, D_x=15, NY=6, D_y=15, gFuncMethod='ICS')
+            source_config = BHEConfig(q_geo = 0.0185, r_b=0.152/2, r_p=0.02, SDR=11, l_ss=tc, rhoc_ss=2.65e6, l_g=1.75, rhoc_g=3e6, D_pipes=0.015, NX=1, D_x=15, NY=6, D_y=15, gFuncMethod='ICS')
         else:
             feedback.pushInfo("Performing HHE configuration...")
             source_config = HHEConfig(N_HHE=6, d=0.04, SDR=17, D=1.5)
@@ -318,14 +403,17 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
     
     def shortHelpString(self):
         return ("<p> This tool performs full dimensioning of a thermonet. <p>"
-                "<p> Input files: <br> "
+                "<p><b> Input: </b> <br> "
                 "1. Heating/cooling load for each building/heatpump. <p>"
                 "2. Pipe network topology: Topology of pipes and service pipes "
                 "in thermonet circulating fluid to heatpumps/buildings. "
                 "Can be created using the 'Pipe Topology' tool. <p>"
                 "3. Heat exchanger source mode: Borehole (BHE) or Horizontal (HHE)"
-                "<p> Input parameters and results are stored in an output "
+                "<p><b> Output:</b> Input parameters and results are stored in an output "
                 "report.dat file (not yet implemented). <p>"
+                "<p><b> Advanced parameters: </b> "
+                "Thermal conductivity method, manual value, and AOI. "
+                "(not fully implemented) <p>"
                 )
 
     def createInstance(self):

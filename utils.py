@@ -56,3 +56,54 @@ def calculate_tc(X, Y, depth):
         return tc_weighted_sum / total_thickness
     else:
         return None
+    
+def get_representative_point(input_layer):
+    """
+    Extract a representative point from a vector layer in EPSG:25832.
+    - Polygon: centroid
+    - Line: midpoint
+    - Point: point coordinates
+    
+    Returns (x, y) tuple in EPSG:25832 or raises an exception if input is invalid.
+    """
+    from qgis.core import (QgsVectorLayer, QgsWkbTypes, QgsCoordinateReferenceSystem,
+                           QgsCoordinateTransform, QgsProject)
+
+    if not input_layer or not isinstance(input_layer, QgsVectorLayer):
+        raise ValueError("Invalid input layer!")
+
+    if input_layer.geometryType() not in [
+        QgsWkbTypes.PolygonGeometry,
+        QgsWkbTypes.PointGeometry,
+        QgsWkbTypes.LineGeometry
+    ]:
+        raise ValueError("Input layer must be a polygon, point or line!")
+
+    features = list(input_layer.getFeatures())
+    if len(features) != 1:
+        raise ValueError("Input layer must contain exactly one feature!")
+
+    feature = features[0]
+    if not feature.isValid() or feature.geometry().isEmpty():
+        raise ValueError("Input feature contains invalid or empty geometry!")
+
+    # Reproject to EPSG:25832 if needed
+    geometry   = feature.geometry()
+    source_crs = input_layer.crs()
+    target_crs = QgsCoordinateReferenceSystem("EPSG:25832")
+
+    if source_crs != target_crs:
+        transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
+        geometry.transform(transform)
+
+    # Extract representative point based on geometry type
+    geom_type = input_layer.geometryType()
+
+    if geom_type == QgsWkbTypes.PolygonGeometry:
+        point = geometry.centroid().asPoint()
+    elif geom_type == QgsWkbTypes.PointGeometry:
+        point = geometry.asPoint()
+    elif geom_type == QgsWkbTypes.LineGeometry:
+        point = geometry.interpolate(geometry.length() / 2).asPoint()
+
+    return round(point.x()), round(point.y())

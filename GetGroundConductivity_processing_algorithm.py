@@ -170,11 +170,23 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         centerY = round(point.y())
         feedback.pushInfo(f"Coordinates (EPSG:25832): X={centerX}, Y={centerY}")
         
-        #Hardcode for temporary check
-        centerX = 520000
-        centerY = 6200000
-        feedback.pushInfo(f"Temporary overwriting with hard-coded coordinates (EPSG:25832): X={centerX}, Y={centerY}")
+        # #Hardcode for temporary check
+        # centerX = 520000
+        # centerY = 6200000
+        # feedback.pushInfo(f"Temporary overwriting with hard-coded coordinates (EPSG:25832): X={centerX}, Y={centerY}")
         
+        # Check if coordinates are within Denmark's bounding box (EPSG:25832)
+        DK_X_MIN = 441000
+        DK_X_MAX = 894000
+        DK_Y_MIN = 6048000
+        DK_Y_MAX = 6403000
+        
+        if not (DK_X_MIN <= centerX <= DK_X_MAX and DK_Y_MIN <= centerY <= DK_Y_MAX):
+            feedback.pushInfo(
+                f"Input AOI outside Denmark (X={centerX}, Y={centerY}). "
+                f"Ground thermal conductivity not estimated."
+            )
+            return {}
         
         # Step 2: Create the url for the API call
         base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
@@ -257,8 +269,8 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ]
                      
        
-       	# Step 5: Calculate ground thermal conductivity based on json output and check geological variability          
-        offset     = 100  # metres
+       	# Step 5: Calculate ground thermal conductivity based on json output and check geological sensitivity          
+        offset     = 500  # metres
         offsets    = [
             ( 0,       0),       # center
             ( offset,  0),       # E
@@ -293,23 +305,46 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             tc_range = tc_max - tc_min
             tc_dev = (tc_range/2)/tc_depthavg*100
             feedback.pushInfo(f"Average thermal conductivity 0-{input_depth} m: {tc_depthavg:.2f} W/m·K")
-            feedback.pushInfo(f"Uncertainty estimate — min: {tc_min:.2f}, max: {tc_max:.2f}, range: {tc_range:.2f} W/m·K ({tc_dev:.1f} %)")
+            feedback.pushInfo(f"Sensitivity estimate — min: {tc_min:.2f}, max: {tc_max:.2f}, range: {tc_range:.2f} W/m·K ({tc_dev:.1f} %)")
         else:
             feedback.pushInfo("Warning: insufficient points to estimate uncertainty")
             
+        # Depth sensitivity: +/- 25% of input_depth at center point only
+        dev=25
+        depth_low  = round(input_depth * (1-dev/100))
+        depth_high = round(input_depth * (1+dev/100))
         
+        tc_depth_low  = calculate_tc(centerX, centerY, depth_low)
+        tc_depth_high = calculate_tc(centerX, centerY, depth_high)
+        
+        if tc_depth_low is not None and tc_depth_high is not None:
+            tc_hdev = ((tc_depth_high - tc_depthavg)/tc_depthavg)*100
+            tc_ldev = ((tc_depth_low - tc_depthavg)/tc_depthavg)*100
+            feedback.pushInfo(f"Depth sensitivity (+- {dev:.0f}%): Depth={depth_low}m: {tc_depth_low:.2f} W/m·K ({tc_ldev:.1f}%); Depth={depth_high}m: {tc_depth_high:.2f} W/m·K  ({tc_hdev:.1f}%)")
+        else:
+            feedback.pushInfo("Warning: could not retrieve TC values for depth sensitivity")
+
+
         # Add information to figure before saving
-        
-        # Build the text string for the annotation
+        # Build figure annotation text - geological and depth sensitivity reported separately
         if len(tc_values) > 1:
-            tc_text = (
+            geo_text = (
                 f"Ground thermal conductivity (0–{input_depth} m): {tc_depthavg:.2f} W/m·K\n"
-                f"Geological uncertainty (100 m radius): min={tc_min:.2f}, max={tc_max:.2f}, range={tc_range:.2f} W/m·K  ({tc_dev:.1f} %)"
+                f"Geological sensitivity ({offset} m radius): min={tc_min:.2f}, max={tc_max:.2f}, range={tc_range:.2f} W/m·K ({tc_dev:.1f} %)"
             )
         else:
-            tc_text = (
-                f"Ground thermal conductivity (0–{input_depth} m): {tc_depthavg:.3f} W/m·K"
+            geo_text = (
+                f"Ground thermal conductivity (0–{input_depth} m): {tc_depthavg:.2f} W/m·K"
             )
+        
+        if tc_depth_low is not None and tc_depth_high is not None:
+            depth_text = (
+                f"Depth sensitivity (+- {dev:.0f}%): Depth={depth_low}m: {tc_depth_low:.2f} W/m·K ({tc_ldev:.1f}%); Depth={depth_high}m: {tc_depth_high:.2f} W/m·K  ({tc_hdev:.1f}%)"
+            )
+        else:
+            depth_text = "Depth sensitivity: could not be estimated"
+        
+        tc_text = geo_text + "\n" + depth_text
         
         # Add text box just above the legend
         fig.text(
@@ -344,7 +379,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         
        	#Save figure
        	os.makedirs(output_folder, exist_ok=True)
-       	out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}.png")
+       	out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}_{input_depth}m.png")
        	fig.savefig(out_path, dpi=150, bbox_inches="tight")
        	feedback.pushInfo(f"Figure saved to: {out_path}")
        
@@ -500,8 +535,11 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         """
         return (
             "<p><b> This tool: </b> <p>"
-            "<p> 1.Returns the ground thermal conductivity at the centroid of the input AOI polygon to the input depth "
-            "The ground thermal conductivity depends on the local geology and the water content and is found by "
+            "<p> 1.Returns the ground thermal conductivity at the input AOI: polygon"
+            " centroid, line center, or point - averaged to the input depth. "
+            "The ground thermal conductivity depends on the local geology and "
+            "the water content. Data on ground water table and local geology is"
+            " retrieved by "
             "an API call to the tool developed by GEUS (REFERENCE). <p> "
                )
     
