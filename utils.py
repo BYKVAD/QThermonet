@@ -8,6 +8,56 @@ Contains functions that should be reachable from any processing algorithm
 # utils.py
 import requests as rq
 
+def fetch_api_data(X, Y):
+    """
+    Fetch raw API data for a given point.
+    Returns data dict or raises a ValueError with a descriptive message.
+    """
+    
+    # Check if coordinates are within Denmark's bounding box (EPSG:25832)
+    DK_X_MIN = 441000
+    DK_X_MAX = 894000
+    DK_Y_MIN = 6048000
+    DK_Y_MAX = 6403000
+
+    if not (DK_X_MIN <= X <= DK_X_MAX and DK_Y_MIN <= Y <= DK_Y_MAX):
+        raise ValueError(
+            f"Coordinates (X={X}, Y={Y}) are outside Denmark. "
+            f"Ground thermal conductivity cannot be estimated."
+        )
+        
+    base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
+    params   = {"x": X, "y": Y}
+
+    try:
+        response = rq.get(base_url, params=params, timeout=10)
+    except rq.exceptions.ConnectionError:
+        raise ValueError("Could not connect to the GEUS API. Check your internet connection.")
+    except rq.exceptions.Timeout:
+        raise ValueError(f"The GEUS API request timed out for X={X}, Y={Y}.")
+    except rq.exceptions.RequestException as e:
+        raise ValueError(f"Unexpected error during API request: {str(e)}")
+
+    if response.status_code != 200:
+        raise ValueError(f"API returned status code {response.status_code} for X={X}, Y={Y}.")
+
+    # Try to parse JSON
+    try:
+        data = response.json()
+    except ValueError:
+        raise ValueError(f"API returned invalid JSON for X={X}, Y={Y}: {response.text[:200]}")
+
+    # Check for error key in response
+    if "error" in data:
+        raise ValueError(f"API returned an error for X={X}, Y={Y}: {data['error']}")
+
+    # Check that expected keys are present
+    for key in ["layers", "groundlevel", "phreatic"]:
+        if key not in data:
+            raise ValueError(f"API response missing expected key '{key}' for X={X}, Y={Y}.")
+
+    return data
+
 def calculate_tc(X, Y, depth):
     """
     Fetch API data and calculate weighted average thermal conductivity 
@@ -15,19 +65,23 @@ def calculate_tc(X, Y, depth):
     Returns thermal conductivity value or None if the API call fails.
     """
 
-    base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
-    params   = {"x": X, "y": Y}
+    # base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
+    # params   = {"x": X, "y": Y}
 
-    response = rq.get(base_url, params=params)
+    # response = rq.get(base_url, params=params)
 
-    if response.status_code != 200:
+    # if response.status_code != 200:
+    #     return None
+
+    # data = response.json()
+
+    # if "error" in data:
+    #     return None
+
+    try:
+        data = fetch_api_data(X, Y)
+    except ValueError:
         return None
-
-    data = response.json()
-
-    if "error" in data:
-        return None
-
     if depth == 150:
         return data["tc_avg_0m_150m"]
 

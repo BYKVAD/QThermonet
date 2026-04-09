@@ -35,6 +35,7 @@ import requests as rq
 import inspect
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.gridspec import GridSpec
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
@@ -50,7 +51,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes
     )
-from .utils import calculate_tc
+from .utils import calculate_tc, fetch_api_data, get_representative_point
 
 
 class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
@@ -106,68 +107,10 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
         input_depth = self.parameterAsInt(parameters, self.DEPTH, context)
         output_folder = self.parameterAsString(parameters, 'OUTPUT_FOLDER', context)
-        
-        # Check input AOI layer
-        feedback.pushInfo("Checking input layer ...")
-        if not input_area_layer or not isinstance(input_area_layer, QgsVectorLayer):
-            raise QgsProcessingException("Invalid input layer!")
-        
-        if input_area_layer.geometryType() not in [
-            QgsWkbTypes.PolygonGeometry,
-            QgsWkbTypes.PointGeometry,
-            QgsWkbTypes.LineGeometry
-        ]:
-            raise QgsProcessingException("Input layer must be a polygon, point or line!")
-        
-        features = list(input_area_layer.getFeatures())
-        if len(features) != 1:
-            raise QgsProcessingException("The input layer must contain exactly one feature!")
-        
-        feature = features[0]
-        if not feature.isValid():
-            raise QgsProcessingException("The input feature contains invalid geometry!")
-        if feature.geometry().isEmpty():
-            raise QgsProcessingException("The input feature has an empty geometry!")
-        if input_area_layer.geometryType() == QgsWkbTypes.PolygonGeometry:
-            if not feature.geometry().isGeosValid():
-                raise QgsProcessingException("The input feature geometry has errors!")
-
-        
 
         # Step 1: Calculate the center coordinates of the AOI input (EPSG:25832)
-        geometry = feature.geometry()
-        
-        # Reproject to EPSG:25832 (Danish UTM) if the layer is in a different CRS
-        source_crs = input_area_layer.crs()
-        target_crs = QgsCoordinateReferenceSystem("EPSG:25832")
-        
-        if source_crs != target_crs:
-            transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
-            geometry.transform(transform)
-            feedback.pushInfo(f"Reprojected layer from {source_crs.authid()} to EPSG:25832")
-        
-        # Extract representative point based on geometry type
-        geom_type = input_area_layer.geometryType()
-        
-        if geom_type == QgsWkbTypes.PolygonGeometry:
-            point = geometry.centroid().asPoint()
-            feedback.pushInfo("Polygon geometry detected — using centroid")
-        
-        elif geom_type == QgsWkbTypes.PointGeometry:
-            point = geometry.asPoint()
-            feedback.pushInfo("Point geometry detected — using point coordinates")
-        
-        elif geom_type == QgsWkbTypes.LineGeometry:
-            # Interpolate point at halfway along the line
-            length = geometry.length()
-            point  = geometry.interpolate(length / 2).asPoint()
-            feedback.pushInfo("Line geometry detected — using midpoint")
-        
-        else:
-            raise QgsProcessingException("Unsupported geometry type — must be polygon, point or line!")
-        
-        centerX = round(point.x())
-        centerY = round(point.y())
+        feedback.pushInfo("Calculating input coordinates...")
+        centerX, centerY = get_representative_point(input_area_layer)
         feedback.pushInfo(f"Coordinates (EPSG:25832): X={centerX}, Y={centerY}")
         
         # #Hardcode for temporary check
@@ -175,47 +118,26 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         # centerY = 6200000
         # feedback.pushInfo(f"Temporary overwriting with hard-coded coordinates (EPSG:25832): X={centerX}, Y={centerY}")
         
-        # Check if coordinates are within Denmark's bounding box (EPSG:25832)
-        DK_X_MIN = 441000
-        DK_X_MAX = 894000
-        DK_Y_MIN = 6048000
-        DK_Y_MAX = 6403000
         
-        if not (DK_X_MIN <= centerX <= DK_X_MAX and DK_Y_MIN <= centerY <= DK_Y_MAX):
-            feedback.pushInfo(
-                f"Input AOI outside Denmark (X={centerX}, Y={centerY}). "
-                f"Ground thermal conductivity not estimated."
-            )
-            return {}
-        
-        # Step 2: Create the url for the API call
-        base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
-        params = {
-           		"x": centerX,
-           		"y": centerY,
-           		"crs": "EPSG:25832"
-        }
-        
-
-        # Step 3: Request data from the api and check whether it was succesful
+        # Step 2: Request data from the api and check whether it was succesful
         feedback.pushInfo(f"Requesting data for X={centerX}, Y={centerY}")
-        response = rq.get(base_url, params=params)
-        feedback.pushInfo(f"Status code: {response.status_code}")
-        if response.status_code == 200:
-            data = response.json()
-            # feedback.pushInfo(f"Raw API response: {data}")
-            feedback.pushInfo(f"Ground level: {data['groundlevel']}")
-            feedback.pushInfo(f"Avg thermal conductivity to 150 m: {data['tc_avg_0m_150m']}")
-            for aquifer in data["aquifers"]:
-                feedback.pushInfo(f"Aquifer {aquifer['magasin_id']}: "
-                                  f"top={aquifer['top']}m, thickness={aquifer['thickness']}m")
-            for layer in data["layers"]:
-                feedback.pushInfo(f"{layer['name']}: {layer['top']}m.b.g. to {layer['bottom']}m.b.g.")
-        else:
-            feedback.pushInfo(f"Request failed with status code: {response.status_code}")
+        try:
+            data = fetch_api_data(centerX, centerY)
+        except ValueError as e:
+            raise QgsProcessingException(str(e))
+            
+        # feedback.pushInfo(f"Raw API response: {data}")
+        feedback.pushInfo(f"Ground level: {data['groundlevel']} m a.s.l.")
+        feedback.pushInfo(f"Water table: {data['groundlevel']-data['phreatic']} m a.s.l.")
+        feedback.pushInfo(f"Avg thermal conductivity to 150 m: {data['tc_avg_0m_150m']}")
+        for aquifer in data["aquifers"]:
+            feedback.pushInfo(f"Aquifer {aquifer['magasin_id']}: "
+                              f"top={aquifer['top']}m, thickness={aquifer['thickness']}m")
+        for layer in data["layers"]:
+            feedback.pushInfo(f"{layer['name']}: {layer['top']}m.b.g. to {layer['bottom']}m.b.g.")
 
 
-       	# Step 4: Unpack the json data structure and create a figure of the local geology
+       	# Step 3: Unpack the json data structure and create a figure of the local geology
        	layers      = data["layers"]
        	groundlevel = data["groundlevel"]
        	phreatic    = data["phreatic"]
@@ -226,27 +148,43 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
        	colour_map   = {name: cmap(i) for i, name in enumerate(unique_names)}
        
        	# Initiate figure
-       	fig, (ax_a, ax_b) = plt.subplots(
-           	1, 2,
-           	figsize       = (10, 11),
-           	gridspec_kw   = {"wspace": 0.45},
-       	)
+       	# fig, (ax_a, ax_b) = plt.subplots(
+        #    	1, 2,
+        #    	figsize       = (10, 11),
+        #    	gridspec_kw   = {"wspace": 0.45},
+       	# )
+        fig = plt.figure(figsize=(13, 11))
+        gs  = GridSpec(
+            1, 5,
+            figure       = fig,
+            width_ratios = [4, 1, 0.8, 4, 1],   # geology, tc, geology, tc
+            wspace       = 0.08,            # tight spacing between geology and tc panels
+            left         = 0.08,
+            right        = 0.95,
+        )
+        
+        ax_a    = fig.add_subplot(gs[0, 0])
+        ax_a_tc = fig.add_subplot(gs[0, 1])
+        ax_b    = fig.add_subplot(gs[0, 3])
+        ax_b_tc = fig.add_subplot(gs[0, 4])
+        
        	fig.suptitle(
            	f"Geological Depth Profile  |  X={centerX}, Y={centerY}",
            	fontsize=11, fontweight="bold", y=0.98,
        	)
        
         
-       	# Fig. 1A: Full geological profile
+       	# Fig. 1A: Full geological profile (upper 1 km)
        	panel_a_top    = groundlevel
-        panel_a_bottom = groundlevel - max(l["bottom"] for l in layers)
+        panel_a_bottom = groundlevel - 1000 # max(l["bottom"] for l in layers)
        	self.draw_panel(
            	ax_a, layers, groundlevel, phreatic, colour_map,
            	y_min_elev = panel_a_top,
            	y_max_elev = panel_a_bottom,
-           	title      = "Panel A – Full profile", 
-            feedback   = feedback
+           	title      = "Panel A – Upper 1 km below ground", 
+             feedback   = feedback
              )
+        self.draw_tc_panel(ax_a_tc, layers, groundlevel, panel_a_top, panel_a_bottom, feedback)
     	
        	# Fig. 1B: Zoom-in on geology down to depth that came with user input
        	panel_b_top    = groundlevel
@@ -256,8 +194,9 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
            	y_min_elev = panel_b_top,
            	y_max_elev = panel_b_bottom,
            	title      = f"Panel B – Upper {input_depth} m below ground",
-            feedback   = feedback
+             feedback   = feedback
        	)
+        self.draw_tc_panel(ax_b_tc, layers, groundlevel, panel_b_top, panel_b_bottom)
        
        	# legend
        	# Sort unique names by their top value (shallowest first)
@@ -269,7 +208,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ]
                      
        
-       	# Step 5: Calculate ground thermal conductivity based on json output and check geological sensitivity          
+       	# Step 4: Calculate ground thermal conductivity based on json output and check geological sensitivity          
         offset     = 500  # metres
         offsets    = [
             ( 0,       0),       # center
@@ -325,7 +264,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo("Warning: could not retrieve TC values for depth sensitivity")
 
 
-        # Add information to figure before saving
+        # Step 5: Add information to figure before saving
         # Build figure annotation text - geological and depth sensitivity reported separately
         if len(tc_values) > 1:
             geo_text = (
@@ -437,6 +376,71 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ax.set_title(title, fontsize=9, fontweight="bold")
         ax.yaxis.set_tick_params(labelsize=8)
         
+    def draw_tc_panel(self, ax, layers, groundlevel, y_min_elev, y_max_elev, feedback=None):
+    
+        sorted_layers = sorted(layers, key=lambda l: l["top"])
+    
+        for i, layer in enumerate(sorted_layers):
+            top    = groundlevel - layer["top"]
+            bottom = groundlevel - layer["bottom"]
+            tc     = layer["tc_corrected_for_phreatic"]
+    
+            # Skip layers entirely outside the visible window
+            if top < y_max_elev or bottom > y_min_elev:
+                if feedback:
+                    feedback.pushInfo(f"  TC SKIPPED: {layer['name']} top={top:.2f}, bottom={bottom:.2f}")
+                continue
+    
+            # Clip to visible window
+            plot_top    = min(top,    y_min_elev)
+            plot_bottom = max(bottom, y_max_elev)
+    
+            if feedback:
+                feedback.pushInfo(f"  TC PLOTTING: {layer['name']} plot_top={plot_top:.2f}, plot_bottom={plot_bottom:.2f}, tc={tc}")
+    
+            # Horizontal line at tc value spanning the layer
+            ax.plot(
+                [tc, tc],
+                [plot_top, plot_bottom],
+                color     = "black",
+                linewidth = 1.2,
+            )
+            
+            # Fill area to the left of the curve
+            ax.fill_betweenx(
+                y      = [plot_top, plot_bottom],
+                x1     = 0.8,              # left edge of plot (matches ax.set_xlim left value)
+                x2     = tc,
+                color  = "mediumpurple",
+                alpha  = 0.25,
+            )
+    
+            # Vertical connector to next layer
+            if i < len(sorted_layers) - 1:
+                next_layer  = sorted_layers[i + 1]
+                tc_next     = next_layer["tc_corrected_for_phreatic"]
+                join_elev   = groundlevel - layer["bottom"]
+                join_clipped = max(join_elev, y_max_elev)
+                ax.plot(
+                    [tc, tc_next],
+                    [join_clipped, join_clipped],
+                    color     = "black",
+                    linewidth = 0.6,
+                )
+    
+        ax.set_ylim(y_min_elev, y_max_elev)
+        ax.invert_yaxis()
+        ax.set_yticklabels([])
+        ax.yaxis.set_tick_params(length=0)
+        ax.set_xlabel("TC\n(W/m·K)", fontsize=6)
+        ax.xaxis.set_label_position("top")
+        ax.xaxis.tick_top()
+        ax.tick_params(axis="x", labelsize=6)
+        ax.set_xlim(0.8, 3.0)
+        ax.grid(axis="x", linewidth=0.3, linestyle=":", color="gray")
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(0.6)
         
     def calculate_tc_internal(self, centerX, centerY, input_depth, feedback=None):
         """Fetch API data and calculate weighted average thermal conductivity for a single point."""
