@@ -184,7 +184,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
            	title      = "Panel A – Upper 1 km below ground", 
              feedback   = feedback
              )
-        self.draw_tc_panel(ax_a_tc, layers, groundlevel, panel_a_top, panel_a_bottom, feedback)
+        self.draw_tc_panel(ax_a_tc, layers, groundlevel, panel_a_top, panel_a_bottom) #feedback
     	
        	# Fig. 1B: Zoom-in on geology down to depth that came with user input
        	panel_b_top    = groundlevel
@@ -196,7 +196,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
            	title      = f"Panel B – Upper {input_depth} m below ground",
              feedback   = feedback
        	)
-        self.draw_tc_panel(ax_b_tc, layers, groundlevel, panel_b_top, panel_b_bottom)
+        self.draw_tc_panel(ax_b_tc, layers, groundlevel, panel_b_top, panel_b_bottom) #feedback
        
        	# legend
        	# Sort unique names by their top value (shallowest first)
@@ -208,7 +208,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ]
                      
        
-       	# Step 4: Calculate ground thermal conductivity based on json output and check geological sensitivity          
+       	# Step 4: Calculate ground thermal conductivity based on json output and check spatial sensitivity          
         offset     = 500  # metres
         offsets    = [
             ( 0,       0),       # center
@@ -237,7 +237,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         # Center point value is the primary result
         tc_depthavg = tc_values[0] if tc_values else None
         
-        # Geological uncertainty estimate from spread across all 9 points
+        # Spatial uncertainty estimate from spread across all 9 points
         if len(tc_values) > 1:
             tc_min   = min(tc_values)
             tc_max   = max(tc_values)
@@ -265,11 +265,11 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
 
 
         # Step 5: Add information to figure before saving
-        # Build figure annotation text - geological and depth sensitivity reported separately
+        # Build figure annotation text - spatial and depth sensitivity reported separately
         if len(tc_values) > 1:
             geo_text = (
                 f"Ground thermal conductivity (0–{input_depth} m): {tc_depthavg:.2f} W/m·K\n"
-                f"Geological sensitivity ({offset} m radius): min={tc_min:.2f}, max={tc_max:.2f}, range={tc_range:.2f} W/m·K ({tc_dev:.1f} %)"
+                f"Spatial sensitivity ({offset} m radius): min={tc_min:.2f}, max={tc_max:.2f}, range={tc_range:.2f} W/m·K ({tc_dev:.1f} %)"
             )
         else:
             geo_text = (
@@ -539,12 +539,13 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         """
         return (
             "<p><b> This tool: </b> <p>"
-            "<p> 1.Returns the ground thermal conductivity at the input AOI: polygon"
-            " centroid, line center, or point - averaged to the input depth. "
-            "The ground thermal conductivity depends on the local geology and "
-            "the water content. Data on ground water table and local geology is"
-            " retrieved by "
-            "an API call to the tool developed by GEUS (REFERENCE). <p> "
+            "<p> 1.Calculates the ground thermal conductivity at the input AOI: polygon"
+            " centroid, line center, or point - averaged to the input depth. <p> "
+            "<p> 2. Creates a report of the ground thermal conductivity based on"
+            " the local geology and water content, and provides spatial and depth sensitivity "
+            "estimates. The report is saved to the selected folder (png). "
+            "<p> Data on ground water table and local geology is"
+            " retrieved by an API call to the tool developed by GEUS (REFERENCE). <p> "
                )
     
     def createInstance(self):

@@ -65,19 +65,6 @@ def calculate_tc(X, Y, depth):
     Returns thermal conductivity value or None if the API call fails.
     """
 
-    # base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
-    # params   = {"x": X, "y": Y}
-
-    # response = rq.get(base_url, params=params)
-
-    # if response.status_code != 200:
-    #     return None
-
-    # data = response.json()
-
-    # if "error" in data:
-    #     return None
-
     try:
         data = fetch_api_data(X, Y)
     except ValueError:
