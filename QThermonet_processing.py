@@ -33,7 +33,7 @@ __revision__ = '$Format:%H$'
 import os
 import sys
 import inspect
-from .processing import utils
+from . import utils
 
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
@@ -41,7 +41,7 @@ from PyQt5.QtWidgets import QMenu
 
 from qgis.core import QgsApplication
 import processing
-from .processing.QThermonet_processing_provider import QThermonetProvider
+from .QThermonet_processing_provider import QThermonetProvider
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
