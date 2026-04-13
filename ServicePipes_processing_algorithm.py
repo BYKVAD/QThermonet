@@ -55,6 +55,7 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 import os
 import inspect
+from . import utils
 from osgeo import ogr
 
 class ServicePipesAlgorithm(QgsProcessingAlgorithm):
@@ -427,9 +428,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo-servicep.png')))
-        return icon
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo-servicep.png')))
+        return QIcon(utils.get_resource('logo-servicep.png'))
   
     def shortHelpString(self):
         return (

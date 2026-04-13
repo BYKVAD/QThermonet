@@ -32,6 +32,7 @@ __revision__ = '$Format:%H$'
 
 import os
 import inspect
+from . import utils
 from collections import deque
 from qgis import processing
 from qgis.PyQt.QtGui import QIcon
@@ -549,8 +550,9 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
 
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        return QIcon(os.path.join(cmd_folder, 'logo6-pipes-simple.png'))
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # return QIcon(os.path.join(cmd_folder, 'logo6-pipes-simple.png'))
+        return QIcon(utils.get_resouce('logo6-pipes-simple.png'))
 
     def shortHelpString(self):
         return ("<p><b> This tool: </b></p>"

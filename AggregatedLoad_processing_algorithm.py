@@ -32,6 +32,8 @@ __revision__ = '$Format:%H$'
 
 import os
 import inspect
+from . import utils
+
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
@@ -242,9 +244,9 @@ class AggregatedLoadAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo3.png')))
-        return icon
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'resources/logo3.png')))
+        return QIcon(utils.get_resource('logo3.png'))
     
     def shortHelpString(self):
         """
