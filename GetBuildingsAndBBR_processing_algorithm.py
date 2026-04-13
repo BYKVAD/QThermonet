@@ -34,6 +34,7 @@ import os
 from qgis import processing
 import inspect
 import requests as rq
+from . import utils
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
@@ -571,7 +572,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 response = rq.get(url=bbr_url, params=params)
                 data = response.json()
                 for x in data:
-                    BuildYear_value = x['byg026Opførelsesår']
+                    BuildYear_value = x.get('byg026Opførelsesår', 0)
                     BuildCode_value = x['byg021BygningensAnvendelse']
                     BuildArea_value = x.get('byg038SamletBygningsareal', 0)
                     feedback.pushInfo(
