@@ -37,7 +37,9 @@ from . import utils
 
 from qgis.PyQt.QtGui import QIcon, QColor
 
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import (QCoreApplication,
+                              QSettings)
+
 from qgis.core import (QgsProcessing,
                        QgsCategorizedSymbolRenderer,
                        QgsCoordinateTransformContext,
@@ -47,8 +49,10 @@ from qgis.core import (QgsProcessing,
                        QgsField,
                        QgsFields,
                        QgsProcessingAlgorithm,
+                       QgsProcessingParameterEnum,
                        QgsProcessingParameterBoolean,
                        QgsProcessingParameterFeatureSource,
+                       QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingException,
                        QgsProject,
@@ -60,6 +64,12 @@ from qgis.core import (QgsProcessing,
 
 from PyQt5.QtCore import QVariant
 
+try:
+    from fast_load_estimator.estimator import estimate_heatload
+    HAS_FAST_LOAD_ESTIMATOR = True
+except ModuleNotFoundError:
+    HAS_FAST_LOAD_ESTIMATOR = False
+
 
 class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
     
@@ -68,6 +78,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
     INPUT = 'INPUT'
 
     def initAlgorithm(self, config=None):
+        settings = QSettings()
         
         # 1st input
         param = QgsProcessingParameterFeatureSource(
@@ -85,6 +96,31 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         )
 
         self.addParameter(param)
+
+        # 2nd input (Heat load estimation method)
+        self.METHODS = ['Heatatlas', 'fast_load_estimator (EnergyPlus)']
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                'CALC_METHOD',
+                self.tr('Heat load estimation method'),
+                options=self.METHODS,
+                defaultValue=0  # Heatatlas selected by default
+            )
+        )
+
+        # 3rd input (EnergyPlus exe)
+        eplus_default = settings.value("fast_load_estimator/energyplus_exe", "")
+        self.addParameter(
+            QgsProcessingParameterFile(
+                'EPLUS_EXE_PATH',
+                self.tr('Path to EnergyPlus executable file (energyplus.exe)'),
+                behavior=QgsProcessingParameterFile.File,
+                fileFilter='Executable (*.exe)',
+                defaultValue=eplus_default,
+                optional=True  # Not required if Heatatlas is selected
+            )
+        )
+
         
         # 1st output
         self.addParameter(
@@ -114,6 +150,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         )
 
     def processAlgorithm(self, parameters, context, feedback):
+
         #Handle input layers
         input_layer = self.parameterAsVectorLayer(
             parameters, self.INPUT, context)
@@ -123,16 +160,35 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             parameters, "OPEN_OUTPUT", context)
         dat_output_path = self.parameterAsFileOutput(
             parameters, "DAT_OUTPUT", context)
+        self.method = self.parameterAsEnum(parameters, 'CALC_METHOD', context)
 
         if not input_layer:
             raise QgsProcessingException("Invalid input layer!")
+        
+        # Heat load estimation method
+        if self.method == 0:  # Heatatlas
+            pass
+        elif self.method == 1:  # Fast Load Estimator
+            self.energyplus_exe = self.parameterAsFile(parameters, 'EPLUS_EXE_PATH', context)
+
+            if not self.energyplus_exe:
+                raise QgsProcessingException("Please provide the path to the EnergyPlus .exe file.")
+            
+            if not self.energyplus_exe.endswith('energyplus.exe'):
+                raise QgsProcessingException(
+                    f"Expected 'energyplus.exe', got '{str(self.energyplus_exe)}'. "
+                    "Please select the correct EnergyPlus executable."
+                )
+            # Save energyplus.exe path to Qgis environment
+            settings = QSettings()
+            settings.setValue("fast_load_estimator/energyplus_exe", self.energyplus_exe)
 
         # Get all features and fields
         input_features = list(input_layer.getFeatures())
         input_fields = input_layer.fields()
         updated_fields = QgsFields()
         geometries = []
-             
+
         # Step 1: Process 'BBRUUID' field
         bbruuid_values = []
         if not any(field.name() == "BBRUUID" for field in input_fields):
@@ -206,7 +262,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             for feature in input_features:
                 BBRarea_values.append(feature.attribute("BBRarea"))
                 
-        # Step 5: Calculate bulding heat loads
+        # Step 5: Calculate building heat loads
         feedback.pushInfo("Calculating building heatload...")
         YHL_values, WHL_values, DHL_values = self.calc_heat_loads(
             BuildYear_values, BuildCode_values, BBRarea_values, thermonet_values, feedback)
@@ -388,14 +444,22 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         annual loads based on fudge factors from Silkeborg case.
         
         """
+
         # Initiate output variables
         YHLs = []
         WHLs = []
         DHLs = []
         
-        for B_year, B_code, B_area, In_Thermonet in zip(BuildYear_values, BuildCode_values, BBRarea_values, Thermonet):  
+        total_buildings = len(Thermonet)
+        thermonet_buildings = Thermonet.count('Yes')
+
+        for i, (B_year, B_code, B_area, In_Thermonet) in enumerate(zip(BuildYear_values, BuildCode_values, BBRarea_values, Thermonet)):
+            
             if feedback.isCanceled():
                 break
+
+            feedback.pushInfo(f"Processing building {i+1} of {total_buildings}...")
+            feedback.setProgress(int((i / total_buildings) * 100))
             
             # Access field values
             area = int(B_area or 0)
@@ -430,12 +494,31 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             # Calculate HeatLoad
             if construction_year == 0 or area == 0 or inThermonet == "no":  # Handle NULL values
                 year_heat_load_value = 0.0
-            else:
+
+            elif self.method == 0: # Heatatlas
                 # Get heat load from heat atlas table lookup and convert to W
-                YHL = self.get_heat_demand(build_code, year_idx, feedback) #kWh m-2 yr-1
-                YHL_W = (YHL * 1000)/(8766) #Yearly heat load in W
+                yhl = self.get_heat_demand(build_code, year_idx, feedback) #kWh m-2 yr-1
+                yhl_w = (yhl * 1000)/(8766) #Yearly heat load in W
                 # feedback.pushInfo(f"Yearly heat load for building: {round(YHL_W,1)} W m-2")
-                year_heat_load_value = YHL_W * area
+                year_heat_load_value = yhl_w * area
+            
+            elif self.method == 1: # fast_load_estimator
+                if not HAS_FAST_LOAD_ESTIMATOR:
+                    raise RuntimeError(
+                        "'fast_load_estimator' is not installed."
+                    )
+                # Estimate heat load with fast_load_estimator (Eplus output in W)
+                # Dummy inputs #NOTE Delete these at some point!
+                weather_station = 'lund'
+                building_type = 'single-family-house'
+                construction_periods = "1996-2005"
+                yhl = estimate_heatload(
+                            building_type = building_type,
+                            construction_period = construction_periods,
+                            weather_station = weather_station,
+                            energyplus_exe = self.energyplus_exe,
+                        )
+                year_heat_load_value = yhl
                 
             #Calculate dummy seasonal and daily heat loads for now
             WHLdummy = 1.6  # dummy factor to convert from annual to winter heat load
