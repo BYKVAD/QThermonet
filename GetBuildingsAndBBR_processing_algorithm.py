@@ -258,14 +258,16 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
         ## Step 2: Get BBR information for each building based on the BBRUUID 
         feedback.pushInfo("Retrieving BBR information...")
-        BuildYear_values, BuildCode_values, BBRarea_values = self.BBR(transformed_layer, BBR_UID, BBR_PW, feedback)
+        BuildYear_values, BuildCode_values, BBRarea_values, BuildHeatInstallation_values, FuelType_values = self.BBR(transformed_layer, BBR_UID, BBR_PW, feedback)
         
         feedback.pushInfo("Adding BBR information to output file ...")
         # Define new fields
         new_fields = [
             QgsField("BuildYear", QVariant.Int),
             QgsField("BuildCode", QVariant.Int),
-            QgsField("BBRarea", QVariant.Int)
+            QgsField("BBRarea", QVariant.Int),
+            QgsField("BuildHeat", QVariant.Int),
+            QgsField("FuelType", QVariant.Int),
         ]
         
         # Start editing the layer
@@ -279,6 +281,8 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             feature.setAttribute("BuildYear", BuildYear_values[i])
             feature.setAttribute("BuildCode", BuildCode_values[i])
             feature.setAttribute("BBRarea", BBRarea_values[i])
+            feature.setAttribute("BuildHeat", BuildHeatInstallation_values[i])
+            feature.setAttribute("FuelType", FuelType_values[i])
             transformed_layer.updateFeature(feature)
         
         transformed_layer.commitChanges()
@@ -546,6 +550,8 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         BuildYear_values = []
         BuildCode_values = []
         BBRArea_values = []
+        BuildHeatInstallation_values = []
+        FuelType_values = []
 
         bbr_url = 'https://services.datafordeler.dk/BBR/BBRPublic/1/rest/bygning'
 
@@ -575,22 +581,28 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                     BuildYear_value = x.get('byg026Opførelsesår', 0)
                     BuildCode_value = x['byg021BygningensAnvendelse']
                     BuildArea_value = x.get('byg038SamletBygningsareal', 0)
+                    BuildHeatInstallation_value = x.get('byg056Varmeinstallation', 0)
+                    FuelType_value = x.get('byg057Opvarmningsmiddel', 0)
                     feedback.pushInfo(
-                        f"Year: {BuildYear_value}, Code: {BuildCode_value}, Area: {BuildArea_value}")
+                        f"Year: {BuildYear_value}, Code: {BuildCode_value}, Area: {BuildArea_value}, Heat: {BuildHeatInstallation_value}, Fuel: {FuelType_value}")
             
                 BuildYear_values.append(BuildYear_value)
                 BuildCode_values.append(BuildCode_value)
                 BBRArea_values.append(BuildArea_value)
+                BuildHeatInstallation_values.append(BuildHeatInstallation_value)
+                FuelType_values.append(FuelType_value)
                 
             else: #If no BBRUUID for feature
                 BuildYear_values.append(0)
                 BuildCode_values.append(0)
                 BBRArea_values.append(0)
+                BuildHeatInstallation_values.append(0)
+                FuelType_values.append(0)
             
             # Update progress
             feedback.setProgress(int(100 * current / total_features))
         
-        return BuildYear_values, BuildCode_values, BBRArea_values
+        return BuildYear_values BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values
 
 
     def name(self):
@@ -647,7 +659,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             " calculation of heatloads in a later step. <p> "
             "<p> 2. Retrieves building information from the BBR database: "
             "BuildYear ('byg026Opførelsesår'), BuildCode ('byg021BygningensAnvendelse'),"
-            " and BBRarea ('byg038SamletBygningsareal'). Key to the codes can "
+            ", BBRarea ('byg038SamletBygningsareal') and HeatInstallation(byg056Varmeinstallation). Key to the codes can "
             "be found at https://teknik.bbr.dk/kodelister (in Danish) <p>"
             "<p> 3. Adds a variable/field 'Thermonet' that is set to 'No' if "
             "the building has 'BBRRUID' = 'Null', 'BBRarea' = 0, or 'BuildCode'"
