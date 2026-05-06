@@ -602,7 +602,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             # Update progress
             feedback.setProgress(int(100 * current / total_features))
         
-        return BuildYear_values BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values
+        return BuildYear_values, BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values
 
 
     def name(self):
