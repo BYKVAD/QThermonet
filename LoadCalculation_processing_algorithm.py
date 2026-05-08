@@ -80,7 +80,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             "The input layer must:\n"
             "- Be a polygon layer (e.g., representing building footprints).\n"
             "- Contain the required fields: 'BuildYear', 'BuildCode', "
-            " 'BBRarea', and 'BBRUUID'.\n"
+            " 'BBRArea', and 'BBRUUID'.\n"
             "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
         )
 
@@ -148,7 +148,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         if not any(field.name() == "Thermonet" for field in input_fields):
             feedback.pushInfo("Adding 'Thermonet' features...")
             
-            expression = QgsExpression('CASE WHEN "BBRUUID" IS NOT NULL AND "BBRarea" <> 0  AND BuildCode < 200 THEN \'Yes\' ELSE \'No\' END')
+            expression = QgsExpression('CASE WHEN "BBRUUID" IS NOT NULL AND "BBRArea" <> 0  AND BuildCode < 200 THEN \'Yes\' ELSE \'No\' END')
             context = QgsExpressionContext()
             context.appendScopes(
                 QgsExpressionContextUtils.globalProjectLayerScopes(input_layer))   
@@ -197,19 +197,19 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             for feature in input_features:
                 BuildCode_values.append(feature.attribute("BuildCode"))
                 
-        BBRarea_values = []
-        if not any(field.name() == "BBRarea" for field in input_fields):
+        BBRArea_values = []
+        if not any(field.name() == "BBRArea" for field in input_fields):
             raise QgsProcessingException(
-                'The input layer is missing the required "BBRarea" field!')
+                'The input layer is missing the required "BBRArea" field!')
         else:
-            feedback.pushInfo("Copying 'BBRarea' features...")
+            feedback.pushInfo("Copying 'BBRArea' features...")
             for feature in input_features:
-                BBRarea_values.append(feature.attribute("BBRarea"))
+                BBRArea_values.append(feature.attribute("BBRArea"))
                 
         # Step 5: Calculate bulding heat loads
         feedback.pushInfo("Calculating building heatload...")
         YHL_values, WHL_values, DHL_values = self.calc_heat_loads(
-            BuildYear_values, BuildCode_values, BBRarea_values, thermonet_values, feedback)
+            BuildYear_values, BuildCode_values, BBRArea_values, thermonet_values, feedback)
         
         # Step 6: Create updated features
         updated_fields.append(QgsField("id.lokalId", QVariant.String))
@@ -217,7 +217,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         updated_fields.append(QgsField("Thermonet", QVariant.String))
         updated_fields.append(QgsField("BuildYear", QVariant.Int, "integer", len=4))
         updated_fields.append(QgsField("BuildCode", QVariant.Int, "integer", len=3))
-        updated_fields.append(QgsField("BBRarea", QVariant.Int, "integer", len=10))
+        updated_fields.append(QgsField("BBRArea", QVariant.Int, "integer", len=10))
         updated_fields.append(QgsField("YrHeatLoad", QVariant.Double, "double", len=10, prec=0))
         updated_fields.append(QgsField("WiHeatLoad", QVariant.Double, "double", len=10, prec=0))
         updated_fields.append(QgsField("DyHeatLoad", QVariant.Double, "double", len=10, prec=0))
@@ -237,7 +237,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             attributes[updated_fields.indexOf("Thermonet")] = thermonet_values[idx] if idx < len(thermonet_values) else None
             attributes[updated_fields.indexOf("BuildYear")] = BuildYear_values[idx] if idx < len(BuildYear_values) else None
             attributes[updated_fields.indexOf("BuildCode")] = BuildCode_values[idx] if idx < len(BuildCode_values) else None
-            attributes[updated_fields.indexOf("BBRarea")] = BBRarea_values[idx] if idx < len(BBRarea_values) else None
+            attributes[updated_fields.indexOf("BBRArea")] = BBRArea_values[idx] if idx < len(BBRArea_values) else None
             attributes[updated_fields.indexOf("YrHeatLoad")] = YHL_values[idx] if idx < len(YHL_values) else None
             attributes[updated_fields.indexOf("WiHeatLoad")] = WHL_values[idx] if idx < len(WHL_values) else None
             attributes[updated_fields.indexOf("DyHeatLoad")] = DHL_values[idx] if idx < len(DHL_values) else None
@@ -381,7 +381,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Output GeoJSON saved to: {output_path}")
         
 
-    def calc_heat_loads(self, BuildYear_values, BuildCode_values, BBRarea_values, Thermonet, feedback):
+    def calc_heat_loads(self, BuildYear_values, BuildCode_values, BBRArea_values, Thermonet, feedback):
         """
         Calculates the building heatloads (annual, winter, daily)
         NB: using dummy values to calculate winter and daily loads from 
@@ -393,7 +393,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         WHLs = []
         DHLs = []
         
-        for B_year, B_code, B_area, In_Thermonet in zip(BuildYear_values, BuildCode_values, BBRarea_values, Thermonet):  
+        for B_year, B_code, B_area, In_Thermonet in zip(BuildYear_values, BuildCode_values, BBRArea_values, Thermonet):  
             if feedback.isCanceled():
                 break
             
