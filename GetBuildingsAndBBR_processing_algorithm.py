@@ -33,6 +33,7 @@ import os
 from qgis import processing
 import inspect
 from urllib.parse import quote
+from osgeo import gdal
 
 import requests as rq
 from . import utils
@@ -192,9 +193,6 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
         buildings_layer = None
         transformed_layer = None
-
-        if not input_area_layer.isValid():
-            raise QgsProcessingException("Failed to load the input layer!")
         
         feedback.pushInfo("Input layer loaded successfully!")
         try:
@@ -209,7 +207,15 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 f"&CQL_FILTER=WITHIN(gdk60:geometri,{polygon_wkt_encoded})"
             )
 
-            buildings_layer = QgsVectorLayer(complete_url, "Buildings", "ogr")
+            response = rq.get(complete_url, timeout=(20, 120))           
+            response.raise_for_status()
+
+            # Write the GeoJSON response to GDAL's virtual memory filesystem so QGIS can read it
+            gdal.FileFromMemBuffer('/vsimem/buildings.geojson', response.text.encode())
+            buildings_layer = QgsVectorLayer('/vsimem/buildings.geojson', 'Buildings', 'ogr')
+
+            # old version
+            # buildings_layer = QgsVectorLayer(complete_url, "Buildings", "ogr")
 
             if not buildings_layer.isValid():
                 raise QgsProcessingException(
@@ -236,6 +242,9 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 transformed_provider.addFeature(new_feat)
 
             transformed_layer.updateExtents()
+
+            # Free the virtual memory now that all features have been copied to transformed_layer
+            gdal.Unlink('/vsimem/buildings.geojson')
 
         except QgsProcessingException:
             raise
@@ -276,7 +285,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         # --------------------------------------------------
         # STEP 3: THERMONET FIELD
         # --------------------------------------------------
-        self.thermonet(transformed_layer, feedback)
+        self.thermonet(transformed_layer)
 
         # --------------------------------------------------
         # STEP 4: EXPORT BUILDINGS
@@ -343,7 +352,15 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                     f"&CQL_FILTER=INTERSECTS(gdk60:geometri,{polygon_wkt_encoded})"
                 )
 
-                roads_layer = QgsVectorLayer(roads_url, "Roads", "ogr")
+                response = rq.get(roads_url, timeout=(20, 120))           
+                response.raise_for_status()
+
+                # Write the GeoJSON response to GDAL's virtual memory filesystem so QGIS can read it
+                gdal.FileFromMemBuffer('/vsimem/roads.geojson', response.text.encode())
+                roads_layer = QgsVectorLayer('/vsimem/roads.geojson', 'Roads', 'ogr')
+
+                # old version
+                # roads_layer = QgsVectorLayer(roads_url, "Roads", "ogr")
 
                 if not roads_layer.isValid():
                     feedback.pushInfo("Failed to load the roads vector layer from Datafordeler.")
@@ -370,6 +387,9 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                         road_feature_count += 1
 
                     transformed_roads_layer.updateExtents()
+
+                    # Free the virtual memory now that all features have been copied to transformed_layer
+                    gdal.Unlink('/vsimem/roads.geojson')
 
                     if road_feature_count == 0:
                         feedback.pushInfo("Road layer loaded, but no road features were found inside the AOI.")
