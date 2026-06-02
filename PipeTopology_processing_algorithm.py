@@ -449,7 +449,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         return utils.get_resouce('logo6-pipes-alt.png')
 
     def shortHelpString(self):
-        return (
+        return 
             "<p> This tool creates a pipe topology file for the thermonet that "
             "can be used as input to pythermonet.<p> "
             "<p> The tool requires two input files: <p> "
@@ -464,7 +464,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             " The tool stores the relevant information in new geojson and dat files. <p>"
             "<p> The output dat-file can be used as input for full "
             "dimensioning of the thermonet using pythermonet <p>"
-        )
+        
 
     def createInstance(self):
         return PipeTopologyAlgorithm()

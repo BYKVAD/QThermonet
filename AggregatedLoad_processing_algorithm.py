@@ -252,12 +252,12 @@ class AggregatedLoadAlgorithm(QgsProcessingAlgorithm):
         """
         Return a short help string for the algorithm.
         """
-        return ("<p> This algorithm calculates the aggregated building heatload "
+        return "<p> This algorithm calculates the aggregated building heatload "
                 "for an input file of building heatloads. <p> "
                 "<p> The output dat-file can be used as input to pythermonet "
                 "to dimension sources of a thermonet. <p>"
                 "<p> COP values of heatpumps are set from input parameters <p>"
-                )
+                
     
     def createInstance(self):
         return AggregatedLoadAlgorithm()
