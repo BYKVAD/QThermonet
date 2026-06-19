@@ -32,6 +32,7 @@ __revision__ = '$Format:%H$'
 
 import os
 import inspect
+from . import utils
 
 from qgis.core import (
     QgsProcessing,
@@ -145,9 +146,9 @@ class ToggleThermonetAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2a.png')))
-        return icon
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2a.png')))
+        return QIcon(utils.get_resource('logo2a.png'))
 
     def shortHelpString(self):
         return (

@@ -52,6 +52,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis import processing
 import os
 import inspect
+from . import utils
 
 class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
     
@@ -443,9 +444,9 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo6-pipes-alt.png')))
-        return icon
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo6-pipes-alt.png')))
+        return utils.get_resouce('logo6-pipes-alt.png')
 
     def shortHelpString(self):
         return (
