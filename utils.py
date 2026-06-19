@@ -148,3 +148,10 @@ def get_representative_point(input_layer):
         point = geometry.interpolate(geometry.length() / 2).asPoint()
 
     return round(point.x()), round(point.y())
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).parent
+RESOURCES_DIR = PLUGIN_ROOT / "resources"
+
+def get_resource(filename: str) -> str:
+    return str(RESOURCES_DIR / filename)

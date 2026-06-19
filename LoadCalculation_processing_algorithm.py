@@ -33,6 +33,8 @@ __revision__ = '$Format:%H$'
 import os
 import inspect
 import pandas as pd
+from . import utils
+
 from qgis.PyQt.QtGui import QIcon, QColor
 
 from qgis.PyQt.QtCore import QCoreApplication
@@ -542,9 +544,9 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
 
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2b.png')))
-        return icon
+        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2b.png')))
+        return QIcon(utils.get_resource('logo2b.png'))
 
     def shortHelpString(self):
         return ("<p><b> This tool: </b><p>"
