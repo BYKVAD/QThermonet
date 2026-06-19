@@ -402,7 +402,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         return icon
     
     def shortHelpString(self):
-        return ("<p> This tool performs full dimensioning of a thermonet. <p>"
+        return ("<p> This tool performs full dimensioning of a thermonet using "
+                "Pythermonet to size pipes and sources."
                 "<p><b> Input: </b> <br> "
                 "1. Heating/cooling load for each building/heatpump. <p>"
                 "2. Pipe network topology: Topology of pipes and service pipes "
@@ -414,6 +415,12 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 "<p><b> Advanced parameters: </b> "
                 "Thermal conductivity method, manual value, and AOI. "
                 "(not fully implemented) <p>"
+                "<p> <b> References: </b> <p>"
+                "<p> Erbs Poulsen, S., & Tordrup, K. (2025). An integrated design "
+                "model for ambient temperature district heating and cooling networks. "
+                "Science and Technology for the Built Environment, 31(8), 879–888. "
+                "<a href=\"https://doi.org/10.1080/23744731.2025.2523198\">https://doi.org/10.1080/23744731.2025.2523198</a>.<p>" 
+                "<p> Code on GitHub: <a href=\"https://github.com/BYKVAD/pythermonetII\">https://github.com/BYKVAD/pythermonetII</a>.<p>"
                 )
 
     def createInstance(self):
