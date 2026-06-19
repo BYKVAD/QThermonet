@@ -303,8 +303,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         net = Thermonet(
             D_gridpipes=0.3,
             l_p=0.4,
-            l_s_H=tc, #1.25, Thermal conductivity from GEUS API call, not tested
-            l_s_C=tc, #1.25, Thermal conductivity from GEUS API call, not tested
+            l_s_H=tc, #1.25, Thermal conductivity from GEUS API call
+            l_s_C=tc, #1.25, Thermal conductivity from GEUS API call
             rhoc_s=2.5e6,
             z_grid=1.2,
             T0=9.03,

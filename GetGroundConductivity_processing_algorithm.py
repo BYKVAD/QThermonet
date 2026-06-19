@@ -39,17 +39,12 @@ from matplotlib.gridspec import GridSpec
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
-    QgsCoordinateTransform,
-    QgsCoordinateReferenceSystem,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSource,
-    QgsProcessingParameterFolderDestination,
-    QgsProject,
-    QgsVectorLayer,
-    QgsWkbTypes
+    QgsProcessingParameterFolderDestination
     )
 from .utils import calculate_tc, fetch_api_data, get_representative_point
 
@@ -181,7 +176,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
            	ax_a, layers, groundlevel, phreatic, colour_map,
            	y_min_elev = panel_a_top,
            	y_max_elev = panel_a_bottom,
-           	title      = "Panel A – Upper 1 km below ground", 
+           	title      = "Panel A – Upper 1 km", 
              feedback   = feedback
              )
         self.draw_tc_panel(ax_a_tc, layers, groundlevel, panel_a_top, panel_a_bottom) #feedback
@@ -193,7 +188,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
            	ax_b, layers, groundlevel, phreatic, colour_map,
            	y_min_elev = panel_b_top,
            	y_max_elev = panel_b_bottom,
-           	title      = f"Panel B – Upper {input_depth} m below ground",
+           	title      = f"Panel B – Upper {input_depth} m",
              feedback   = feedback
        	)
         self.draw_tc_panel(ax_b_tc, layers, groundlevel, panel_b_top, panel_b_bottom) #feedback
@@ -356,7 +351,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             if (plot_top - plot_bottom) > (y_min_elev - y_max_elev) * 0.03:
                 ax.text(
                     0.5, (plot_top + plot_bottom) / 2,
-                    layer["name"],
+                    f"{layer["name"]}: tc =  {layer["tc_corrected_for_phreatic"]:.2f}  W/m·K",
                     ha="center", va="center",
                     fontsize=7, color="black",
                     clip_on=True,
