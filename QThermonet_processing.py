@@ -54,6 +54,7 @@ class QThermonetPlugin(object):
     def __init__(self, iface):
         self.provider = None
         self.iface = iface
+        self.plugin_actions = [] #new addition to fix deleted c++ object problem
 
     def initProcessing(self):
         """Init Processing provider for QGIS >= 3.8."""
@@ -70,16 +71,6 @@ class QThermonetPlugin(object):
             self.iface.mainWindow().menuBar().addMenu(self.menu)
         
         self.plugin_actions = []  # Keep track of actions for cleanup
-        
-        # # Tool: test functionality
-        # icon_tests = os.path.join(cmd_folder, 'logo.png')
-        # self.action_tests = QAction(
-        #     QIcon(icon_tests),
-        #     u"Test", self.iface.mainWindow())
-        # self.action_tests.triggered.connect(self.run_tests)
-        # self.iface.addPluginToMenu(u"&QThermonet", self.action_tests)
-        # self.menu.addAction(self.action_tests)
-        # self.plugin_actions.append(self.action_tests)
         
         # Tool: Get buildings in AOI
         icon_get_buildings = utils.get_resource('logo2.png')
@@ -108,7 +99,7 @@ class QThermonetPlugin(object):
         # icon_load_calculation = os.path.join(cmd_folder, 'logo2b.png')
         self.action_load_calculation = QAction(
             QIcon(icon_load_calculation),
-            u"Calculate heatloads", self.iface.mainWindow())
+            u"Calculate heat loads", self.iface.mainWindow())
         self.action_load_calculation.triggered.connect(self.run_LoadCalculation)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_load_calculation)
         self.menu.addAction(self.action_load_calculation)
@@ -145,6 +136,16 @@ class QThermonetPlugin(object):
         self.iface.addPluginToMenu(u"&QThermonet", self.action_service_pipes)
         self.menu.addAction(self.action_service_pipes)
         self.plugin_actions.append(self.action_service_pipes)
+
+        # Tool: Get ground conductivity
+        icon_ground_conductivity = os.path.join(cmd_folder, 'logo-thermalcond.png')
+        self.action_ground_conductivity = QAction(
+            QIcon(icon_ground_conductivity),
+            u"Get ground conductivity", self.iface.mainWindow())
+        self.action_ground_conductivity.triggered.connect(self.run_GetGroundConductivity)
+        self.iface.addPluginToMenu(u"&QThermonet", self.action_ground_conductivity)
+        self.menu.addAction(self.action_ground_conductivity)
+        self.plugin_actions.append(self.action_ground_conductivity)
         
         # Tool: Pipe topology
         icon_pipe_topology = utils.get_resource('logo6-pipes-alt.png')
@@ -162,7 +163,7 @@ class QThermonetPlugin(object):
         # icon_full_dimensioning = os.path.join(cmd_folder, 'logo.png')
         self.action_full_dimensioning = QAction(
             QIcon(icon_full_dimensioning),
-            u"Full_dimensioning", self.iface.mainWindow())
+            u"Full dimensioning", self.iface.mainWindow())
         self.action_full_dimensioning.triggered.connect(self.run_FullDimensioning)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_full_dimensioning)
         self.menu.addAction(self.action_full_dimensioning)
@@ -179,7 +180,6 @@ class QThermonetPlugin(object):
         # self.plugin_actions.append(self.action_qpythermonet)
         
         # Add toolbar icons for quick access to the tools
-        # self.iface.addToolBarIcon(self.action_tests)
         self.iface.addToolBarIcon(self.action_get_buildings)
         self.iface.addToolBarIcon(self.action_toggle_thermonet)
         self.iface.addToolBarIcon(self.action_load_calculation)
@@ -190,48 +190,32 @@ class QThermonetPlugin(object):
         # self.iface.addToolBarIcon(self.action_qpythermonet)
     
     def unload(self):
-        QgsApplication.processingRegistry().removeProvider(self.provider)
-        
-        # self.iface.removePluginMenu(u"&QThermonet", self.action_tests)
-        # self.iface.removeToolBarIcon(self.action_tests)
-        
-        self.iface.removePluginMenu(u"&QThermonet", self.action_get_buildings)
-        self.iface.removeToolBarIcon(self.action_get_buildings)
-                
-        self.iface.removePluginMenu(u"&QThermonet", self.action_toggle_thermonet)
-        self.iface.removeToolBarIcon(self.action_toggle_thermonet)
-                        
-        self.iface.removePluginMenu(u"&QThermonet", self.action_load_calculation)
-        self.iface.removeToolBarIcon(self.action_load_calculation)
-        
-        # self.iface.removePluginMenu(u"&QThermonet", self.action_aggregated_load)
-        # self.iface.removeToolBarIcon(self.action_aggregated_load)
-        
-        
-        self.iface.removePluginMenu(u"&QThermonet", self.action_pipe_hierarchy)
-        self.iface.removeToolBarIcon(self.action_pipe_hierarchy)
-        
-        self.iface.removePluginMenu(u"&QThermonet", self.action_service_pipes)
-        self.iface.removeToolBarIcon(self.action_service_pipes)
-        
-        self.iface.removePluginMenu(u"&QThermonet", self.action_pipe_topology)
-        self.iface.removeToolBarIcon(self.action_pipe_topology)
-        
-        self.iface.removePluginMenu(u"&QThermonet", self.action_full_dimensioning)
-        self.iface.removeToolBarIcon(self.action_full_dimensioning)
-        
-        # self.iface.removePluginMenu(u"&QThermonet", self.action_qpythermonet)
-        # self.iface.removeToolBarIcon(self.action_qpythermonet)
-        
-        # Remove the menu and actions
+        # Clean up all actions via the tracked list
+        for action in self.plugin_actions:
+            try:
+                self.iface.removePluginMenu(u"&QThermonet", action)
+                self.iface.removeToolBarIcon(action)
+            except RuntimeError:
+                pass
+    
+        # Remove the menu
         if hasattr(self, 'menu') and self.menu:
-            for action in self.plugin_actions:
-                self.menu.removeAction(action)
-            menu_bar = self.iface.mainWindow().menuBar()
-            menu_bar.removeAction(self.menu.menuAction())
+            try:
+                for action in self.plugin_actions:
+                    self.menu.removeAction(action)
+                menu_bar = self.iface.mainWindow().menuBar()
+                menu_bar.removeAction(self.menu.menuAction())
+            except RuntimeError:
+                pass
+    
+        # Remove processing provider
+        try:
+            if self.provider is not None:
+                QgsApplication.processingRegistry().removeProvider(self.provider)
+                self.provider = None
+        except RuntimeError:
+            self.provider = None
         
-    # def run_tests(self):
-    #     processing.execAlgorithmDialog("QThermonet:Test")
             
     def run_GetbuildingsinAOI(self):
         processing.execAlgorithmDialog("QThermonet:Get buildings and BBR information")
@@ -240,7 +224,7 @@ class QThermonetPlugin(object):
         processing.execAlgorithmDialog("QThermonet:Optional: Toggle thermonet buildings")
         
     def run_LoadCalculation(self):
-        processing.execAlgorithmDialog("QThermonet:Calculate heatloads")
+        processing.execAlgorithmDialog("QThermonet:Calculate heat loads")
         
     # def run_AggregatedLoads(self):
     #     processing.execAlgorithmDialog("QThermonet:Calculate aggregated heat load")
@@ -251,6 +235,9 @@ class QThermonetPlugin(object):
     def run_ShortestServicePipes(self):
         processing.execAlgorithmDialog("QThermonet:Shortest Service Pipes")
         
+    def run_GetGroundConductivity(self):
+        processing.execAlgorithmDialog("QThermonet:Get ground conductivity")
+
     def run_PipeTopology(self):
         processing.execAlgorithmDialog("QThermonet:Pipe Topology")
                 
