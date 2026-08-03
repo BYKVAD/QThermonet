@@ -2,7 +2,7 @@
 name=QThermonet (processing)
 qgisMinimumVersion=3.0
 description=This plugin enables dimensioning of thermonets in QGIS using pythermonet.
-version=0.1.1
+version=0.2.0
 author=Jane Lund Andersen/VIA University College
 email=jana@via.dk
 
