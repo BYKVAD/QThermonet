@@ -1,0 +1,10 @@
+# Normalize all text files to LF in the repository and on checkout,
+# regardless of a contributor's local core.autocrlf setting.
+* text=auto eol=lf
+
+# Explicitly binary — never normalize line endings or diff as text.
+*.png binary
+*.pdf binary
+*.shp binary
+*.shx binary
+*.dbf binary
