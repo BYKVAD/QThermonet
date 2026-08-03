@@ -25,14 +25,16 @@
 __author__ = 'Jane Lund Andersen/VIA University College'
 __date__ = '2025-06-10'
 __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
+__revision__ = '$Format:%H$'
 
 # This will get replaced with a git SHA1 when you do a git archive
-
-__revision__ = '$Format:%H$'
 
 import os
 from qgis import processing
 import inspect
+from urllib.parse import quote
+from osgeo import gdal
+
 import requests as rq
 from . import utils
 from qgis.PyQt.QtGui import QIcon, QColor
@@ -40,8 +42,8 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (
     edit,
     QgsCategorizedSymbolRenderer,
-    QgsCoordinateReferenceSystem, 
-    QgsCoordinateTransform, 
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
     QgsExpression,
     QgsExpressionContext,
     QgsExpressionContextUtils,
@@ -68,7 +70,7 @@ from PyQt5.QtCore import QVariant
 
 
 class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
-    
+
     #Handle input/output
     INPUT_AREA = 'INPUT_AREA'
     BBR_UID = 'BBR_UID'
@@ -86,24 +88,21 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             )
         param.setHelp(
             "The input layer must:\n"
-            "- Be a polygon layer (shape or geojson format). \n"
-            "- Contain a single polygon outlining the Area-Of-Interest. \n"
+            "- Be a polygon layer (shape or geojson format).\n"
+            "- Contain a single polygon outlining the Area-Of-Interest.\n"
             "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
         )
         self.addParameter(param)
-        
-        
         #2nd input
         param = QgsProcessingParameterString(
                 self.BBR_UID,
                 self.tr("Username for Datafordeler:"),
-                defaultValue='DUMMY' 
+                defaultValue='DUMMY'
             )
         param.setHelp(
             "Create your username at https://datafordeler.dk:\n"
-        )
+            )
         self.addParameter(param)
-        
         
         #3rd input
         param = QgsProcessingParameterString(
@@ -115,20 +114,16 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             "Create your password at https://datafordeler.dk:\n"
         )
         self.addParameter(param)
-        
-        
         #1st output
         param = QgsProcessingParameterFileDestination(
                 self.OUTPUT_BUILD,
                 self.tr('Output file for buildings'),
-                fileFilter="Geojson (*.geojson)"  # Filter for geojson files
+                fileFilter="GeoJSON (*.geojson)"  # Filter for geojson files
             )
         param.setHelp(
-            "Destination for output file containing buildings with BBR information. \n"
+            "Destination for output file containing buildings with BBR information.\n"
         )
         self.addParameter(param)
-        
-        
         #2nd output
         param_roads = QgsProcessingParameterFileDestination(
             self.OUTPUT_ROADS,
@@ -137,13 +132,11 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         )
         param_roads.setFlags(param_roads.flags() | QgsProcessingParameterDefinition.FlagOptional)
         param_roads.setHelp(
-            "Destination for output file containing roads within AOI (optional). \n"
+            "Destination for output file containing roads within AOI (optional).\n"
             "- For easier definition of pipe network."
         )
         self.addParameter(param_roads)
-        
-        
-        # Add a checkbox for opening the output building file after running
+
         self.addParameter(
             QgsProcessingParameterBoolean(
                 "OPEN_OUTPUT",
@@ -152,25 +145,28 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
-        
     def processAlgorithm(self, parameters, context, feedback):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
         BBR_UID = self.parameterAsString(parameters, self.BBR_UID, context)
         BBR_PW = self.parameterAsString(parameters, self.BBR_PW, context)
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_BUILD, context)
+        output_roads_path = self.parameterAsFileOutput(parameters, self.OUTPUT_ROADS, context)
         open_output = self.parameterAsBoolean(parameters, "OPEN_OUTPUT", context)
-        
-        
+
         # Check input AOI layer
         feedback.pushInfo("Checking input layer ...")
+
         if not input_area_layer or not isinstance(input_area_layer, QgsVectorLayer):
             raise QgsProcessingException("Invalid input layer!")
+
         if input_area_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            raise QgsProcessingException("The input layer must be a polygon layer!")        
-        features = list(input_area_layer.getFeatures()) # Check the feature count
+            raise QgsProcessingException("The input layer must be a polygon layer!")  
+        features = list(input_area_layer.getFeatures())  # Check the feature count
+
         if len(features) != 1:
             raise QgsProcessingException("The input layer must contain exactly one polygon feature!")
-        feature = features[0]         # Validate the geometry
+        feature = features[0]  # Validate the geometry
+
         if not feature.isValid():
             raise QgsProcessingException("The input feature contains invalid geometry!")
         if feature.geometry().isEmpty():
@@ -178,121 +174,124 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         if not feature.geometry().isGeosValid():
             raise QgsProcessingException("The input feature geometry has errors!")
 
-        
-        # Step 1: Retrieve buildings layer      
-        feedback.pushInfo("Retrieving buildings layer from WFS...")
-        
-        # WFS service parameters
+        # Common WFS settings
         wfs_base_url = "https://wfs.datafordeler.dk/GeoDanmarkVektor/GeoDanmark60_NOHIST_GML3/1.0.0/WFS"
         service = "WFS"
         request = "GetFeature"
         version = "2.0.0"
-        layer_name = "gdk60:Bygning"  # Layer name on the WFS server
         startindex = 0
         count = 30000
-        epsg = 25832 #crs code
-        srsname=f"urn:ogc:def:crs:EPSG::{epsg}"
-        target_crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}")
+        epsg = 25832  #crs code
+        srsname = f"urn:ogc:def:crs:EPSG::{epsg}"
+        target_crs_wfs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}")
+        output_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+
+        # --------------------------------------------------
+        # STEP 1: BUILDINGS
+        # --------------------------------------------------
+        feedback.pushInfo("Retrieving buildings layer from WFS...")
+
+        buildings_layer = None
+        transformed_layer = None
         
-        transformed_layer = None  # Initialize transformed_layer to avoid UnboundLocalError
-        
-        if not input_area_layer.isValid():
-            feedback.pushInfo("Failed to load the input layer.")
-        else:
-            feedback.pushInfo("Input layer loaded successfully!")
-            try:
-                # Get the polygon geometry from the input layer
-                polygon_wkt = self.get_polygon_geometry(input_area_layer, target_crs)
-                # feedback.pushInfo(f"Polygon WKT: {polygon_wkt}")
-        
-                # Construct the complete WFS request URL with CQL_FILTER for spatial query
-                complete_url = (
-                    f"{wfs_base_url}?username={BBR_UID}&password={BBR_PW}"
-                    f"&SERVICE={service}&REQUEST={request}&VERSION={version}&TYPENAMES={layer_name}"
-                    f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}"
-                    f"&CQL_FILTER=WITHIN(gdk60:geometri, {polygon_wkt})" #wkt_geom
+        feedback.pushInfo("Input layer loaded successfully!")
+        try:
+            polygon_wkt_wfs = self.get_polygon_geometry(input_area_layer, target_crs_wfs)
+            polygon_wkt_encoded = quote(polygon_wkt_wfs)
+
+            layer_name = "gdk60:Bygning"
+            complete_url = (
+                f"{wfs_base_url}?username={BBR_UID}&password={BBR_PW}"
+                f"&SERVICE={service}&REQUEST={request}&VERSION={version}&TYPENAMES={layer_name}"
+                f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}"
+                f"&CQL_FILTER=WITHIN(gdk60:geometri,{polygon_wkt_encoded})"
+            )
+
+            response = rq.get(complete_url, timeout=(20, 120))           
+            response.raise_for_status()
+
+            # Write the GeoJSON response to GDAL's virtual memory filesystem so QGIS can read it
+            gdal.FileFromMemBuffer('/vsimem/buildings.geojson', response.text.encode())
+            buildings_layer = QgsVectorLayer('/vsimem/buildings.geojson', 'Buildings', 'ogr')
+
+            # old version
+            # buildings_layer = QgsVectorLayer(complete_url, "Buildings", "ogr")
+
+            if not buildings_layer.isValid():
+                raise QgsProcessingException(
+                    f"The buildings layer could not be loaded from WFS. "
+                    f"Check your username, password, and AOI geometry."
                 )
-                # feedback.pushInfo(f"WFS Request URL: {complete_url}")
-        
-                # Load the WFS layer
-                buildings_layer = QgsVectorLayer(complete_url, "Buildings", "ogr")
-        
-                if not buildings_layer.isValid():
-                    feedback.pushInfo("Failed to load the vector layer.")
-                else:
-                    feedback.pushInfo("Vector layer loaded successfully!")
-                    
-                     # Define source and target CRS
-                    source_crs = buildings_layer.crs()
-                    target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-        
-                    # Create a coordinate transform object
-                    transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
-        
-                    # Create a new memory layer with the target CRS
-                    transformed_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "TransformedLayer", "memory")
-                    transformed_provider = transformed_layer.dataProvider()
-                    transformed_provider.addAttributes(buildings_layer.fields())
-                    transformed_layer.updateFields()
-        
-                    # Transform and copy features
-                    for feature in buildings_layer.getFeatures():
-                        geom = feature.geometry()
-                        geom.transform(transform)
-                        feature.setGeometry(geom)
-                        transformed_provider.addFeature(feature)
-                                        
-                    # # Debug: Check first feature's attributes
-                    # first_feature = next(transformed_layer.getFeatures(), None)
-                    # if first_feature:
-                    #     feedback.pushInfo(f"First feature attributes after Thermonet: {first_feature.attributes()}")
 
-        
-            except Exception as e:
-                feedback.pushInfo(f"Error: {e}")
-                transformed_layer = buildings_layer  # Fallback to original if transformation fails
-                
-        if not buildings_layer.isValid():
-           raise QgsProcessingException("The Buildings layer could not be loaded from WFS!")
+            feedback.pushInfo("Buildings vector layer loaded successfully!")
 
+            source_crs = buildings_layer.crs()
+            transform = QgsCoordinateTransform(source_crs, output_crs, QgsProject.instance())
 
-        ## Step 2: Get BBR information for each building based on the BBRUUID 
+            transformed_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "Buildings_4326", "memory")
+            transformed_provider = transformed_layer.dataProvider()
+            transformed_provider.addAttributes(buildings_layer.fields())
+            transformed_layer.updateFields()
+
+            for feature in buildings_layer.getFeatures():
+                new_feat = QgsFeature(transformed_layer.fields())
+                new_feat.setAttributes(feature.attributes())
+                geom = feature.geometry()
+                geom.transform(transform)
+                new_feat.setGeometry(geom)
+                transformed_provider.addFeature(new_feat)
+
+            transformed_layer.updateExtents()
+
+            # Free the virtual memory now that all features have been copied to transformed_layer
+            gdal.Unlink('/vsimem/buildings.geojson')
+
+        except QgsProcessingException:
+            raise
+        except Exception as e:
+            raise QgsProcessingException(f"Error while retrieving buildings: {e}")
+
+        # --------------------------------------------------
+        # STEP 2: BBR
+        # --------------------------------------------------
         feedback.pushInfo("Retrieving BBR information...")
-        BuildYear_values, BuildCode_values, BBRarea_values = self.BBR(transformed_layer, BBR_UID, BBR_PW, feedback)
-        
+        BuildYear_values, BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values = self.BBR(transformed_layer, BBR_UID, BBR_PW, feedback)
+
         feedback.pushInfo("Adding BBR information to output file ...")
-        # Define new fields
+
         new_fields = [
             QgsField("BuildYear", QVariant.Int),
             QgsField("BuildCode", QVariant.Int),
-            QgsField("BBRarea", QVariant.Int)
+            QgsField("BBRArea", QVariant.Int),
+            QgsField("BuildHeat", QVariant.Int),
+            QgsField("FuelType", QVariant.Int)
         ]
-        
-        # Start editing the layer
+
         transformed_layer.startEditing()
+        # transformed_provider already initialised in Step 1
         transformed_provider.addAttributes(new_fields)
         transformed_layer.updateFields()
-        
-        # Start editing and update features
-        transformed_layer.startEditing()
+
         for i, feature in enumerate(transformed_layer.getFeatures()):
             feature.setAttribute("BuildYear", BuildYear_values[i])
             feature.setAttribute("BuildCode", BuildCode_values[i])
-            feature.setAttribute("BBRarea", BBRarea_values[i])
+            feature.setAttribute("BBRArea", BBRArea_values[i])
+            feature.setAttribute("BuildHeat", BuildHeatInstallation_values[i])
+            feature.setAttribute("FuelType", FuelType_values[i])
             transformed_layer.updateFeature(feature)
-        
+
         transformed_layer.commitChanges()
-        
-        
-        # Step 3: Apply 'Thermonet' after transformation
-        self.thermonet(transformed_layer, feedback)
-        
-                    
-        # # Step 4: Export building layer and load it in QGIS with applied symbology
+
+        # --------------------------------------------------
+        # STEP 3: THERMONET FIELD
+        # --------------------------------------------------
+        self.thermonet(transformed_layer)
+
+        # --------------------------------------------------
+        # STEP 4: EXPORT BUILDINGS
+        # --------------------------------------------------
         feedback.pushInfo("Exporting buildings to output file...")
-        # self.save_to_shapefile(updated_features, fields, output_path, buildings_layer.crs(), feedback) #old
-        
-        # Export the buildings layer
+
         error = QgsVectorFileWriter.writeAsVectorFormat(
             transformed_layer,
             output_path,
@@ -300,220 +299,217 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             transformed_layer.crs(),
             "GeoJSON"
         )
-        
+
         error_code = error[0] if isinstance(error, tuple) else error
-            
         if error_code == QgsVectorFileWriter.NoError:
             feedback.pushInfo(f"Layer successfully exported to {output_path}")
         else:
-            feedback.pushInfo("Failed to export the layer.")
+            raise QgsProcessingException(f"Failed to export buildings layer. Error: {error}")
 
-        # Open the output file if the checkbox is checked
         if open_output:
-            feedback.pushInfo("Opening output file...")
-            # Extract the file name without extension to use as the layer name
-            layer_name = os.path.splitext(os.path.basename(output_path))[0]
-            layer = QgsVectorLayer(output_path, layer_name, "ogr")
-            if not layer.isValid():
-                raise QgsProcessingException("Could not load the output layer!")    
-     
-            # Add the layer to the QGIS project
-            QgsProject.instance().addMapLayer(layer)
-        
-            # Set up categorized symbology based on the "Thermonet" field
+            feedback.pushInfo("Opening building output file...")
+            buildings_output_name = os.path.splitext(os.path.basename(output_path))[0]
+            out_buildings_layer = QgsVectorLayer(output_path, buildings_output_name, "ogr")
+
+            if not out_buildings_layer.isValid():
+                raise QgsProcessingException("Could not load the building output layer!")
+
+            QgsProject.instance().addMapLayer(out_buildings_layer)
+
             feedback.pushInfo("Applying symbology...")
             categories = []
-        
-            # Define the categories
-            gray_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            myGray=QColor(200, 200, 200)
-            gray_symbol.setColor(myGray)
+
+            gray_symbol = QgsSymbol.defaultSymbol(out_buildings_layer.geometryType())
+            gray_symbol.setColor(QColor(200, 200, 200))
             categories.append(QgsRendererCategory("No", gray_symbol, "No"))
-        
-            red_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            myRed=QColor(196, 60, 57)
-            red_symbol.setColor(myRed)
+
+            red_symbol = QgsSymbol.defaultSymbol(out_buildings_layer.geometryType())
+            red_symbol.setColor(QColor(196, 60, 57))
             categories.append(QgsRendererCategory("Yes", red_symbol, "Yes"))
-        
-            # Create and set the categorized renderer
+
             renderer = QgsCategorizedSymbolRenderer("Thermonet", categories)
-            if renderer is not None:
-                layer.setRenderer(renderer)
-                layer.triggerRepaint()
-    
-        # Step 5 [optional]: Retrieve roads within input layer
-        output_roads_path = parameters.get(self.OUTPUT_ROADS, None)
-        
+            out_buildings_layer.setRenderer(renderer)
+            out_buildings_layer.triggerRepaint()
+
+        # --------------------------------------------------
+        # STEP 5: OPTIONAL ROADS
+        # --------------------------------------------------
+        roads_created = False
+
         if output_roads_path and output_roads_path != 'TEMPORARY_OUTPUT':
             feedback.pushInfo("")
             feedback.pushInfo("Retrieving roads within AOI and exporting to file ...")
-            
-            layer_name = "gdk60:Vejmidte"  # Layer name on the WFS server
-            target_crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}") #target for wfs retrieval
-            
-            # Get input layer CRS and transform coordinates if necessary
-            input_crs = input_area_layer.crs()
-                
-            # Get bounding box (extent) of the input layer
-            extent = input_area_layer.extent()
-            xmin, ymin, xmax, ymax = extent.xMinimum(), extent.yMinimum(), extent.xMaximum(), extent.yMaximum()
-    
-            # Transform coordinates if CRS is different
-            if input_crs != target_crs:
-                transform = QgsCoordinateTransform(input_crs, target_crs, QgsProject.instance())
-                xmin, ymin = transform.transform(xmin, ymin)
-                xmax, ymax = transform.transform(xmax, ymax)
-        
-            # Construct the complete WFS request URL with BBOX filter
-            complete_url = (
-                        f"{wfs_base_url}?username={BBR_UID}&password={BBR_PW}"
-                        f"&SERVICE={service}&REQUEST={request}&VERSION={version}&TYPENAMES={layer_name}"
-                        f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}"
-                        f"&BBOX={xmin},{ymin},{xmax},{ymax},EPSG:25832"
-                        )
-    
-            # Load the WFS layer
-            roads_layer = QgsVectorLayer(complete_url, "Roads", "ogr")
-    
-            if not roads_layer.isValid():
-                feedback.pushInfo("Failed to load the roads vector layer.")
-            else:
-                feedback.pushInfo("Roads vector layer loaded successfully!")
-                
-                 # Define source and target CRS
-                source_crs = roads_layer.crs()
-                target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-    
-                # Create a coordinate transform object
-                transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
-                
-                # Create a new memory layer with the target CRS
-                transformed_roads_layer = None  # Initialize transformed_roads_layer to avoid UnboundLocalError
-                transformed_roads_layer = QgsVectorLayer("MultiLineString?crs=EPSG:4326", "TransformedLayer", "memory")
-                transformed_roads_provider = transformed_roads_layer.dataProvider()
-                transformed_roads_provider.addAttributes(roads_layer.fields())
-                transformed_roads_layer.updateFields()
-    
-                # Transform and copy features
-                for feature in roads_layer.getFeatures():
-                    geom = feature.geometry()
-                    geom.transform(transform)
-                    feature.setGeometry(geom)
-                    transformed_roads_provider.addFeature(feature)
-                    
-                ## Dissolve roads layer and add to new output layer
-                dissolved_roads = processing.run(
-                    "native:dissolve",
-                    {
-                        'INPUT': transformed_roads_layer,  # Your roads layer
-                        'FIELD': [],  # Empty list = dissolve all features into one
-                        'OUTPUT': 'memory:'  # Use memory layer for temporary result
-                    },
-                    context=context,
-                    feedback=feedback
-                )                
-                dissolved_roads_layer = dissolved_roads['OUTPUT']
-                
-                # Clip the dissolved roads layer using input_area_layer
-                clipped_roads = processing.run(
-                    "native:clip",
-                    {
-                        'INPUT': dissolved_roads_layer,
-                        'OVERLAY': input_area_layer,  # The polygon layer to clip with
-                        'OUTPUT': 'memory:'  # Keep result in memory
-                    },
-                    context=context,
-                    feedback=feedback
-                )                
-                clipped_roads_layer = clipped_roads['OUTPUT']
-                
-                # Split the roads into segments at junctions
-                split_roads = processing.run(
-                    "native:splitwithlines",
-                    {
-                        'INPUT': clipped_roads_layer,
-                        'LINES': clipped_roads_layer,
-                        'OUTPUT': 'memory:'  # Keep result in memory
-                    },
-                    context=context,
-                    feedback=feedback
-                )                
-                split_roads_layer = split_roads['OUTPUT']
-                
-                # Create new ouput layer with geometry only
-                crs = split_roads_layer.crs()
-                new_roads_layer = QgsVectorLayer(f'MultiLineString?crs={crs.authid()}', "Dissolved Roads (No Fields)", "memory")
-                provider = new_roads_layer.dataProvider()
-                
-                for feature in split_roads_layer.getFeatures():
-                    new_feature = QgsFeature()
-                    new_feature.setGeometry(feature.geometry())
-                    provider.addFeature(new_feature)
-                
-                new_roads_layer.updateExtents()
 
-                ## Export the roads layer
-                output_roads_path = self.parameterAsFileOutput(parameters, self.OUTPUT_ROADS, context)
-                error = QgsVectorFileWriter.writeAsVectorFormat(
-                    new_roads_layer,
-                    output_roads_path,
-                    "UTF-8",
-                    new_roads_layer.crs(),
-                    "GeoJSON"
+            try:
+                polygon_wkt_wfs = self.get_polygon_geometry(input_area_layer, target_crs_wfs)
+                polygon_wkt_encoded = quote(polygon_wkt_wfs)
+
+                road_layer_name = "gdk60:Vejmidte"
+                roads_url = (
+                    f"{wfs_base_url}?username={BBR_UID}&password={BBR_PW}"
+                    f"&SERVICE={service}&REQUEST={request}&VERSION={version}&TYPENAMES={road_layer_name}"
+                    f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}"
+                    f"&CQL_FILTER=INTERSECTS(gdk60:geometri,{polygon_wkt_encoded})"
                 )
-                
-                error_code = error[0] if isinstance(error, tuple) else error
-            
-                if error_code == QgsVectorFileWriter.NoError:                    
-                    feedback.pushInfo(f"Layer successfully exported to {output_roads_path}")
+
+                response = rq.get(roads_url, timeout=(20, 120))           
+                response.raise_for_status()
+
+                # Write the GeoJSON response to GDAL's virtual memory filesystem so QGIS can read it
+                gdal.FileFromMemBuffer('/vsimem/roads.geojson', response.text.encode())
+                roads_layer = QgsVectorLayer('/vsimem/roads.geojson', 'Roads', 'ogr')
+
+                # old version
+                # roads_layer = QgsVectorLayer(roads_url, "Roads", "ogr")
+
+                if not roads_layer.isValid():
+                    feedback.pushInfo("Failed to load the roads vector layer from Datafordeler.")
+                    feedback.pushInfo("Road output will be skipped, but building output is still OK.")
                 else:
-                    feedback.pushInfo(f"Failed to export the layer. Error code: {error}")
-            
-            ## Add layer to QGIS
-            if open_output:
-                layer_name = os.path.splitext(os.path.basename(output_roads_path))[0]
-                layer = QgsVectorLayer(output_roads_path, layer_name, "ogr")
-                if not layer.isValid():
-                    raise QgsProcessingException("Could not load the output layer!")    
-                QgsProject.instance().addMapLayer(layer)  # Add the layer to the QGIS project
-                line_symbol = QgsLineSymbol.createSimple({ # Create the main line symbol
-                    'color': 'black',  # Line color
-                    'width': '1.1',  # Line width
-                })
-                layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
-                layer.triggerRepaint() # Refresh the layer to apply the changes
-            
-            ## Finish up
-            feedback.pushInfo("Processing completed successfully.")
-            return {self.OUTPUT_BUILD: output_path,
-                    self.OUTPUT_ROADS: output_roads_path,
-                    }
-        else:
-            feedback.pushInfo("Processing completed successfully.")
-            return {self.OUTPUT_BUILD: output_path}
-    
-    
+                    feedback.pushInfo("Roads vector layer loaded successfully!")
+
+                    source_crs = roads_layer.crs()
+                    transform = QgsCoordinateTransform(source_crs, output_crs, QgsProject.instance())
+
+                    transformed_roads_layer = QgsVectorLayer("MultiLineString?crs=EPSG:4326", "Roads_4326", "memory")
+                    transformed_roads_provider = transformed_roads_layer.dataProvider()
+                    transformed_roads_provider.addAttributes(roads_layer.fields())
+                    transformed_roads_layer.updateFields()
+
+                    road_feature_count = 0
+                    for feature in roads_layer.getFeatures():
+                        new_feature = QgsFeature(transformed_roads_layer.fields())
+                        new_feature.setAttributes(feature.attributes())
+                        geom = feature.geometry()
+                        geom.transform(transform)
+                        new_feature.setGeometry(geom)
+                        transformed_roads_provider.addFeature(new_feature)
+                        road_feature_count += 1
+
+                    transformed_roads_layer.updateExtents()
+
+                    # Free the virtual memory now that all features have been copied to transformed_layer
+                    gdal.Unlink('/vsimem/roads.geojson')
+
+                    if road_feature_count == 0:
+                        feedback.pushInfo("Road layer loaded, but no road features were found inside the AOI.")
+                        feedback.pushInfo("Road output will be skipped.")
+                    else:
+                        dissolved_roads = processing.run(
+                            "native:dissolve",
+                            {
+                                'INPUT': transformed_roads_layer,  # Your roads layer
+                                'FIELD': [],  # Empty list = dissolve all features into one
+                                'OUTPUT': 'memory:'  # Use memory layer for temporary result
+                            },
+                            context=context,
+                            feedback=feedback
+                        )
+                        dissolved_roads_layer = dissolved_roads['OUTPUT']
+
+                        clipped_roads = processing.run(
+                            "native:clip",
+                            {
+                                'INPUT': dissolved_roads_layer,
+                                'OVERLAY': input_area_layer,
+                                'OUTPUT': 'memory:'
+                            },
+                            context=context,
+                            feedback=feedback
+                        )
+                        clipped_roads_layer = clipped_roads['OUTPUT']
+
+                        split_roads = processing.run(
+                            "native:splitwithlines",
+                            {
+                                'INPUT': clipped_roads_layer,
+                                'LINES': clipped_roads_layer,
+                                'OUTPUT': 'memory:'
+                            },
+                            context=context,
+                            feedback=feedback
+                        )
+                        split_roads_layer = split_roads['OUTPUT']
+
+                        if split_roads_layer is None or split_roads_layer.featureCount() == 0:
+                            feedback.pushInfo("Road processing returned no final features.")
+                            feedback.pushInfo("Road output will be skipped.")
+                        else:
+                            # Create new ouput layer with geometry only
+                            crs = split_roads_layer.crs()
+                            new_roads_layer = QgsVectorLayer(
+                                f'MultiLineString?crs={crs.authid()}',
+                                "Dissolved Roads (No Fields)",
+                                "memory"
+                            )
+                            provider = new_roads_layer.dataProvider()
+
+                            for feature in split_roads_layer.getFeatures():
+                                new_feature = QgsFeature()
+                                new_feature.setGeometry(feature.geometry())
+                                provider.addFeature(new_feature)
+
+                            new_roads_layer.updateExtents()
+
+                            error = QgsVectorFileWriter.writeAsVectorFormat(
+                                new_roads_layer,
+                                output_roads_path,
+                                "UTF-8",
+                                new_roads_layer.crs(),
+                                "GeoJSON"
+                            )
+
+                            error_code = error[0] if isinstance(error, tuple) else error
+                            if error_code == QgsVectorFileWriter.NoError:
+                                feedback.pushInfo(f"Layer successfully exported to {output_roads_path}")
+                                roads_created = True
+                            else:
+                                feedback.pushInfo(f"Failed to export the roads layer. Error: {error}")
+
+            except Exception as e:
+                feedback.pushInfo(f"Road processing failed: {e}")
+                feedback.pushInfo("Building output is still completed successfully.")
+
+            # Open road layer only if it was actually created
+            if open_output and roads_created and os.path.exists(output_roads_path):
+                feedback.pushInfo("Opening roads output file...")
+                roads_output_name = os.path.splitext(os.path.basename(output_roads_path))[0]
+                out_roads_layer = QgsVectorLayer(output_roads_path, roads_output_name, "ogr")
+
+                if out_roads_layer.isValid():
+                    QgsProject.instance().addMapLayer(out_roads_layer)
+                    line_symbol = QgsLineSymbol.createSimple({
+                        'color': 'black',
+                        'width': '1.1',
+                    })
+                    out_roads_layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
+                    out_roads_layer.triggerRepaint()
+                else:
+                    feedback.pushInfo("Road output file exists, but QGIS could not load it.")
+
+        feedback.pushInfo("Processing completed successfully.")
+
+        result = {self.OUTPUT_BUILD: output_path}
+        if roads_created:
+            result[self.OUTPUT_ROADS] = output_roads_path
+        return result
+
     def get_polygon_geometry(self, input_layer, target_crs):
-        
-        ''' Function to get the geometry of a single polygon feature from the
+        """
+        Function to get the geometry of a single polygon feature from the
         input layer and transform it.
-        NB: Only handling input files with a single polygon at the moment, can 
-        be updated to handle more '''
-        
+        """
         features = list(input_layer.getFeatures())
-    
         feature = features[0]
         geom = feature.geometry()
-    
-        # Transform the geometry if needed
+
         if input_layer.crs() != target_crs:
             transform = QgsCoordinateTransform(input_layer.crs(), target_crs, QgsProject.instance())
             geom.transform(transform)
-    
-        return geom.asWkt()  # Return the geometry as WKT
 
-             
-    def thermonet(self, layer, feedback):
+        return geom.asWkt()
+
+    def thermonet(self, layer):
         """
         Adds a 'Thermonet' field to the layer using an expression,
         with values based on the 'BBRUUID' field.
@@ -522,11 +518,13 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         if layer_provider.fields().indexFromName("Thermonet") == -1:
             layer_provider.addAttributes([QgsField("Thermonet", QVariant.String)])
             layer.updateFields()
-        
-        expression = QgsExpression('CASE WHEN "BBRUUID" IS NOT NULL AND "BBRarea" <> 0 and "BuildCode" < 200 THEN \'Yes\' ELSE \'No\' END')
+
+        expression = QgsExpression(
+            'CASE WHEN "BBRUUID" IS NOT NULL AND "BBRArea" <> 0 AND "BuildCode" < 200 THEN \'Yes\' ELSE \'No\' END'
+        )
         expr_context = QgsExpressionContext()
         expr_context.appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(layer))
-        
+
         with edit(layer):
             for feature in layer.getFeatures():
                 expr_context.setFeature(feature)
@@ -537,31 +535,25 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 layer.updateFeature(feature)
 
     def BBR(self, layer, BBR_UID, BBR_PW, feedback):
-        """
-
-        :param 
-        :param feedback: Feedback object for progress reporting.
-        :return:
-        """
         BuildYear_values = []
         BuildCode_values = []
         BBRArea_values = []
+        BuildHeatInstallation_values = []
+        FuelType_values = []
 
         bbr_url = 'https://services.datafordeler.dk/BBR/BBRPublic/1/rest/bygning'
+        if not any(layer.getFeatures()):
+            raise QgsProcessingException("No buildings found within the AOI!")
+        total_features = max(layer.featureCount(), 1)
 
-        features = layer.getFeatures()
-        total_features = layer.featureCount()  # Get the total number of features
-   
-        for current, feature in enumerate(features):
+        for current, feature in enumerate(layer.getFeatures()):
             if feedback.isCanceled():
                 break
 
             # Get BBRUUID to pass
             if feature["BBRUUID"]:
                 pass_ids = feature["BBRUUID"]
-                
-                # KRI: We should not do it this way. There is not sensitive information in the bbr
-                # but we do risk exposing our passwords and usernames to the public.
+
                 params = {
                     'format': 'json',
                     'id': pass_ids,
@@ -569,29 +561,50 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                     'password': BBR_PW
                 }
 
-                response = rq.get(url=bbr_url, params=params)
-                data = response.json()
+                try:
+                    response = rq.get(url=bbr_url, params=params, timeout=(20, 120))
+                    response.raise_for_status()
+                    data = response.json()
+                except rq.exceptions.Timeout:
+                    raise QgsProcessingException(f"BBR request timed out for building {current + 1}")
+                except rq.exceptions.HTTPError as e:
+                    raise QgsProcessingException(f"BBR returned an error for building {current + 1}: {e}")
+
+                # saveguard for empty data
+                BuildYear_value = 0
+                BuildCode_value = 0
+                BuildArea_value = 0
+                BuildHeatInstallation_value = 0
+                FuelType_value = 0
                 for x in data:
-                    BuildYear_value = x.get('byg026Opførelsesår', 0)
-                    BuildCode_value = x['byg021BygningensAnvendelse']
-                    BuildArea_value = x.get('byg038SamletBygningsareal', 0)
+                    BuildYear_value = x.get('byg026Opførelsesår') or 0
+                    BuildCode_value = x.get('byg021BygningensAnvendelse') or 0
+                    BuildArea_value = x.get('byg038SamletBygningsareal') or 0
+                    BuildHeatInstallation_value = x.get('byg056Varmeinstallation') or 0
+                    FuelType_value = x.get('byg057Opvarmningsmiddel') or 0
                     feedback.pushInfo(
-                        f"Year: {BuildYear_value}, Code: {BuildCode_value}, Area: {BuildArea_value}")
-            
+                        f"Building {current + 1}/{total_features} - "
+                        f"Year: {BuildYear_value}, Code: {BuildCode_value}, "
+                        f"Area: {BuildArea_value}, Heat: {BuildHeatInstallation_value}, "
+                        f"Fuel: {FuelType_value}"
+                    )
+
                 BuildYear_values.append(BuildYear_value)
                 BuildCode_values.append(BuildCode_value)
                 BBRArea_values.append(BuildArea_value)
-                
-            else: #If no BBRUUID for feature
+                BuildHeatInstallation_values.append(BuildHeatInstallation_value)
+                FuelType_values.append(FuelType_value)
+
+            else:
                 BuildYear_values.append(0)
                 BuildCode_values.append(0)
                 BBRArea_values.append(0)
-            
-            # Update progress
-            feedback.setProgress(int(100 * current / total_features))
-        
-        return BuildYear_values, BuildCode_values, BBRArea_values
+                BuildHeatInstallation_values.append(0)
+                FuelType_values.append(0)
 
+            feedback.setProgress(int(100 * current / total_features))
+
+        return BuildYear_values, BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values
 
     def name(self):
         """
@@ -629,35 +642,35 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
-    
+
     def icon(self):
         cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2.png')))
         return icon
-    
+
     def shortHelpString(self):
-        """
-        Return a short help string for the algorithm.
-        """
         return (
             "<p><b> This tool: </b> <p>"
-            "<p> 1.Retrieves all buildings within the input AOI polygon from a WFS "
+            "<p> 1. Retrieves all buildings within the input AOI polygon from a WFS. "
             "The buildings layer contains a field 'BBRUUID', which is used to "
             "retrieve BBR information for automatic"
-            " calculation of heatloads in a later step. <p> "
+            " calculation of heatloads in a later step. <p>"
             "<p> 2. Retrieves building information from the BBR database: "
-            "BuildYear ('byg026Opførelsesår'), BuildCode ('byg021BygningensAnvendelse'),"
-            " and BBRarea ('byg038SamletBygningsareal'). Key to the codes can "
+            "BuildYear ('byg026Opførelsesår'), BuildCode ('byg021BygningensAnvendelse'), "
+            " BBRArea ('byg038SamletBygningsareal'), BuildHeat('byg056Varmeinstallation') "
+            "and FuelType('byg057Opvarmningsmiddel'). Key to the codes can "
             "be found at https://teknik.bbr.dk/kodelister (in Danish) <p>"
             "<p> 3. Adds a variable/field 'Thermonet' that is set to 'No' if "
-            "the building has 'BBRRUID' = 'Null', 'BBRarea' = 0, or 'BuildCode'"
-            " > 200 (non-residential buildings) <p>"
-            "<p> 4. Stores the buildings in a new file.<p> "
-            "<p> <b>Please note:</b> In order to access BBR information you need to create a user"
-            " at https://datafordeler.dk/ <br>"
-            " Input your own username and password, but please note that the connection"
-            " is not encrypted, so choose a non-sensitive password. <p>"
-               )
-    
+            "the building has 'BBRUUID' = NULL, 'BBRArea' = 0, or 'BuildCode' > 200. <p>"
+            "<p> 4. Stores the buildings in a new file.<p>"
+            "<p> 5. Optionally tries to retrieve roads and export them as a separate file.<p>"
+            "<p> <b>Please note:</b> In order to access BBR information you need to create a user "
+            "at https://datafordeler.dk/ <br>"
+            "Input your own username and password, but please note that the connection "
+            "is not encrypted, so choose a non-sensitive password. <p>"
+        )
+
     def createInstance(self):
         return GetBuildingsAndBBRAlgorithm()
+
+        
