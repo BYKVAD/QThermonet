@@ -433,7 +433,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         return QIcon(utils.get_resource('logo-servicep.png'))
   
     def shortHelpString(self):
-        return (
+        return 
             "<p><b>Tool Description:</b></p>"
             "<p>This tool creates a new layer of service pipes by connecting "
             "a set of heat pumps/buildings in a buildings input layer with "
@@ -452,7 +452,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             "Note that the output service pipes layer containing ID's of the "
             "buildings/heatloads/HPs is an essential input to the 'Pipe "
             "Topology' tool.</p>"
-        )
+        
 
     def createInstance(self):
         return ServicePipesAlgorithm()
