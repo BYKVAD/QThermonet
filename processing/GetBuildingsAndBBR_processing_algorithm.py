@@ -36,7 +36,7 @@ from urllib.parse import quote
 from osgeo import gdal
 
 import requests as rq
-from . import utils
+from .. import utils
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.core import (

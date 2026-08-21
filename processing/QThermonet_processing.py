@@ -33,7 +33,7 @@ __revision__ = '$Format:%H$'
 import os
 import sys
 import inspect
-from . import utils
+from .. import utils
 
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
