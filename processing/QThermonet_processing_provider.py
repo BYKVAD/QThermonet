@@ -32,21 +32,21 @@ __revision__ = '$Format:%H$'
 
 import os
 import inspect
-from . import utils
+from .. import utils
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.core import QgsProcessingProvider
 # from .GetBuildings_processing_algorithm import GetBuildingsAlgorithm
-from .GetBuildingsAndBBR_processing_algorithm import GetBuildingsAndBBRAlgorithm
+from .processing.GetBuildingsAndBBR_processing_algorithm import GetBuildingsAndBBRAlgorithm
 from .LoadCalculation_processing_algorithm import LoadCalculationAlgorithm
 from .ToggleThermonet_processing_algorithm import ToggleThermonetAlgorithm
 # from .AggregatedLoad_processing_algorithm import AggregatedLoadAlgorithm
 from .ServicePipes_processing_algorithm import ServicePipesAlgorithm
 from .PipeHierarchy_processing_algorithm import PipeHierarchyAlgorithm
-from .GetGroundConductivity_processing_algorithm import GetGroundConductivityAlgorithm
+from .processing.GetGroundConductivity_processing_algorithm import GetGroundConductivityAlgorithm
 from .PipeTopology_processing_algorithm import PipeTopologyAlgorithm
 # from .QThermonet_processing_algorithm import QThermonetAlgorithm
-from .FullDimensioning_processing_algorithm import FullDimensioningAlgorithm
+from .processing.FullDimensioning_processing_algorithm import FullDimensioningAlgorithm
 # from .Test_processing_algorithm import TestAlgorithm
 
 

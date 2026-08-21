@@ -40,7 +40,7 @@ SOURCES = \
 	__init__.py \
 	QThermonet_processing.py 
 
-PLUGINNAME = QThermonet_processing
+PLUGINNAME = QThermonet
 
 PY_FILES = \
 	__init__.py \

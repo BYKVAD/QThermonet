@@ -46,7 +46,7 @@ from qgis.core import (
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterFolderDestination
     )
-from .utils import calculate_tc, fetch_api_data, get_representative_point
+from ..utils import calculate_tc, fetch_api_data, get_representative_point
 
 
 class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):

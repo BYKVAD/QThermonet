@@ -33,7 +33,7 @@ __revision__ = '$Format:%H$'
 import os
 import inspect
 import pandas as pd
-from . import utils
+from .. import utils
 
 from qgis.PyQt.QtGui import QIcon, QColor
 

@@ -35,5 +35,5 @@ def classFactory(iface):  # pylint: disable=invalid-name
     :type iface: QgsInterface
     """
     #
-    from .QThermonet_processing import QThermonetPlugin
+    from .processing.QThermonet_processing import QThermonetPlugin
     return QThermonetPlugin(iface)
