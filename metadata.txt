@@ -2,7 +2,7 @@
 name=QThermonet (processing)
 qgisMinimumVersion=3.0
 description=This plugin enables dimensioning of thermonets in QGIS using pythermonet.
-version=0.2.0
+version=0.2.1
 author=Jane Lund Andersen/VIA University College
 email=jana@via.dk
 
@@ -14,7 +14,7 @@ repository=https://github.com/jaluan/QThermonet
 
 hasProcessingProvider=yes
 
-changelog=Removed reference to non-existing test_algorithm in QThermonet_processing_provider.py 
+changelog=Last release supporting QGIS 3.x. Future versions require QGIS 4.
 
 # Tags are comma separated with spaces allowed
 tags=python, energy, thermonet, heating network, cooling network, ground-source energy
