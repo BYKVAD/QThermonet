@@ -524,9 +524,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo-thermalcond.png')))
-        return icon
+        return QIcon(utils.get_logo('logo-thermalcond.png'))
     
     def shortHelpString(self):
         """

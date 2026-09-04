@@ -37,16 +37,15 @@ from qgis.PyQt.QtGui import QIcon
 
 from qgis.core import QgsProcessingProvider
 # from .GetBuildings_processing_algorithm import GetBuildingsAlgorithm
-from .processing.GetBuildingsAndBBR_processing_algorithm import GetBuildingsAndBBRAlgorithm
-from .LoadCalculation_processing_algorithm import LoadCalculationAlgorithm
-from .ToggleThermonet_processing_algorithm import ToggleThermonetAlgorithm
-# from .AggregatedLoad_processing_algorithm import AggregatedLoadAlgorithm
-from .ServicePipes_processing_algorithm import ServicePipesAlgorithm
-from .PipeHierarchy_processing_algorithm import PipeHierarchyAlgorithm
-from .processing.GetGroundConductivity_processing_algorithm import GetGroundConductivityAlgorithm
-from .PipeTopology_processing_algorithm import PipeTopologyAlgorithm
-# from .QThermonet_processing_algorithm import QThermonetAlgorithm
-from .processing.FullDimensioning_processing_algorithm import FullDimensioningAlgorithm
+from .get_buildings_and_bbr_algorithm import GetBuildingsAndBBRAlgorithm
+from .load_calculation_algorithm import LoadCalculationAlgorithm
+from .toggle_thermonet_algorithm import ToggleThermonetAlgorithm
+# from .aggregated_load_algorithm import AggregatedLoadAlgorithm
+from .service_pipes_algorithm import ServicePipesAlgorithm
+from .pipe_hierarchy_algorithm import PipeHierarchyAlgorithm
+from .get_ground_conductivity_algorithm import GetGroundConductivityAlgorithm
+from .pipe_topology_algorithm import PipeTopologyAlgorithm
+from .full_dimensioning_algorithm import FullDimensioningAlgorithm
 # from .Test_processing_algorithm import TestAlgorithm
 
 
@@ -80,7 +79,6 @@ class QThermonetProvider(QgsProcessingProvider):
         self.addAlgorithm(PipeTopologyAlgorithm())
         self.addAlgorithm(FullDimensioningAlgorithm())
         # self.addAlgorithm(TestAlgorithm())
-        # self.addAlgorithm(QThermonetAlgorithm())
     
     def id(self):
         """
@@ -102,7 +100,7 @@ class QThermonetProvider(QgsProcessingProvider):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo.png')))
-        return QIcon(utils.get_resource('logo.png'))
+        return QIcon(utils.get_logo('logo.png'))
 
     def longName(self):
         """

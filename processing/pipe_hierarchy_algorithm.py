@@ -36,8 +36,7 @@ from .. import utils
 from collections import deque
 from qgis import processing
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtCore import QCoreApplication 
-from PyQt5.QtCore import QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (
                        QgsCoordinateTransform, 
                        QgsCoordinateReferenceSystem,
@@ -187,7 +186,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
         field_name = "ellip_length"
         if field_name not in [field.name() for field in split_pipes_layer.fields()]:
-            provider.addAttributes([QgsField(field_name, QVariant.Double)])
+            provider.addAttributes([QgsField(field_name, QMetaType.Type.Double)])
             split_pipes_layer.updateFields()
         
         # Prepare the $length expression
@@ -230,7 +229,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         # Ensure 'Level' field exists before assigning values
         level_field_name = "Level"
         if level_field_name not in [field.name() for field in split_pipes_layer.fields()]:
-            split_pipes_layer.dataProvider().addAttributes([QgsField(level_field_name, QVariant.Int)])
+            split_pipes_layer.dataProvider().addAttributes([QgsField(level_field_name, QMetaType.Type.Int)])
             split_pipes_layer.updateFields()
             
         # Set all levels to -1 to clearly mark unvisited
@@ -261,7 +260,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
         field_name = "ellip_length"
         if field_name not in [field.name() for field in pipes_layer.fields()]:
-            provider.addAttributes([QgsField(field_name, QVariant.Double)])
+            provider.addAttributes([QgsField(field_name, QMetaType.Type.Double)])
             pipes_layer.updateFields()
         
         # Prepare the $length expression
@@ -552,7 +551,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # return QIcon(os.path.join(cmd_folder, 'logo6-pipes-simple.png'))
-        return QIcon(utils.get_resouce('logo6-pipes-simple.png'))
+        return QIcon(utils.get_logo('logo6-pipes-simple.png'))
 
     def shortHelpString(self):
         return ("<p><b> This tool: </b></p>"

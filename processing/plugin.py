@@ -35,13 +35,12 @@ import sys
 import inspect
 from .. import utils
 
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QMenu
 from qgis.PyQt.QtGui import QIcon
-from PyQt5.QtWidgets import QMenu
 
 from qgis.core import QgsApplication
-import processing
-from .QThermonet_processing_provider import QThermonetProvider
+from qgis import processing
+from .provider import QThermonetProvider
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
@@ -73,7 +72,7 @@ class QThermonetPlugin(object):
         self.plugin_actions = []  # Keep track of actions for cleanup
         
         # Tool: Get buildings in AOI
-        icon_get_buildings = utils.get_resource('logo2.png')
+        icon_get_buildings = utils.get_logo('logo2.png')
         # icon_get_buildings = os.path.join(cmd_folder, 'logo2.png')
         self.action_get_buildings = QAction(
             QIcon(icon_get_buildings),
@@ -84,7 +83,7 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_get_buildings)
         
         # Tool: Toggle Thermonet
-        icon_toggle_thermonet = utils.get_resource('logo2a.png')
+        icon_toggle_thermonet = utils.get_logo('logo2a.png')
         # icon_toggle_thermonet = os.path.join(cmd_folder, 'logo2a.png')
         self.action_toggle_thermonet = QAction(
             QIcon(icon_toggle_thermonet),
@@ -95,7 +94,7 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_toggle_thermonet)
         
         # Tool: Calculate heat loads
-        icon_load_calculation = utils.get_resource('logo2b.png')
+        icon_load_calculation = utils.get_logo('logo2b.png')
         # icon_load_calculation = os.path.join(cmd_folder, 'logo2b.png')
         self.action_load_calculation = QAction(
             QIcon(icon_load_calculation),
@@ -116,7 +115,7 @@ class QThermonetPlugin(object):
         # self.plugin_actions.append(self.action_aggregated_load)
         
         # Tool: Pipe hierarchy
-        icon_pipe_hierarchy = utils.get_resource('logo6-pipes-simple.png')
+        icon_pipe_hierarchy = utils.get_logo('logo6-pipes-simple.png')
         # icon_pipe_hierarchy = os.path.join(cmd_folder, 'logo6-pipes-simple.png')
         self.action_pipe_hierarchy = QAction(
             QIcon(icon_pipe_hierarchy),
@@ -127,7 +126,7 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_pipe_hierarchy)
         
         # Tool: Service pipes
-        icon_service_pipes = utils.get_resource('logo-servicep.png')
+        icon_service_pipes = utils.get_logo('logo-servicep.png')
         # icon_service_pipes = os.path.join(cmd_folder, 'logo-servicep.png')
         self.action_service_pipes = QAction(
             QIcon(icon_service_pipes),
@@ -138,7 +137,7 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_service_pipes)
 
         # Tool: Get ground conductivity
-        icon_ground_conductivity = os.path.join(cmd_folder, 'logo-thermalcond.png')
+        icon_ground_conductivity = utils.get_logo('logo-thermalcond.png')
         self.action_ground_conductivity = QAction(
             QIcon(icon_ground_conductivity),
             u"Get ground conductivity", self.iface.mainWindow())
@@ -148,7 +147,7 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_ground_conductivity)
         
         # Tool: Pipe topology
-        icon_pipe_topology = utils.get_resource('logo6-pipes-alt.png')
+        icon_pipe_topology = utils.get_logo('logo6-pipes-alt.png')
         # icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
         self.action_pipe_topology = QAction(
             QIcon(icon_pipe_topology),
@@ -159,7 +158,7 @@ class QThermonetPlugin(object):
         self.plugin_actions.append(self.action_pipe_topology)
         
         # Tool: Full dimensioning
-        icon_full_dimensioning = utils.get_resource('logo.png')
+        icon_full_dimensioning = utils.get_logo('logo.png')
         # icon_full_dimensioning = os.path.join(cmd_folder, 'logo.png')
         self.action_full_dimensioning = QAction(
             QIcon(icon_full_dimensioning),

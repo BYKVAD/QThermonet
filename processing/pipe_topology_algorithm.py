@@ -47,7 +47,7 @@ from qgis.core import (
     QgsWkbTypes
 )
 from collections import Counter
-from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QIcon
 from qgis import processing
 import os
@@ -171,12 +171,12 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         
         # List of fields to add: name, type, length, precision (if applicable)
         field_definitions = [
-            ("Section", QVariant.String, 255, 0), # String field, length 255
-            ("SDR", QVariant.Int, 0, 0),          # Integer field
-            ("Trace_(m)", QVariant.Double, 4, 2), # Double field with 2 decimal places
-            ("Number_of_traces", QVariant.Int, 0, 0),   # Integer field
-            ("Max_pressure_loss_(Pa)", QVariant.Int, 0, 0),   # Integer field
-            ("HP_ID_vector", QVariant.String, 0, 0),  # String field
+            ("Section", QMetaType.Type.QString, 255, 0), # String field, length 255
+            ("SDR", QMetaType.Type.Int, 0, 0),          # Integer field
+            ("Trace_(m)", QMetaType.Type.Double, 4, 2), # Double field with 2 decimal places
+            ("Number_of_traces", QMetaType.Type.Int, 0, 0),   # Integer field
+            ("Max_pressure_loss_(Pa)", QMetaType.Type.Int, 0, 0),   # Integer field
+            ("HP_ID_vector", QMetaType.Type.QString, 0, 0),  # String field
         ]
         
         # Add fields to the QgsFields object
@@ -444,9 +444,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo6-pipes-alt.png')))
-        return utils.get_resouce('logo6-pipes-alt.png')
+        return QIcon(utils.get_logo('logo6-pipes-alt.png'))
 
     def shortHelpString(self):
         return (

@@ -37,7 +37,7 @@ from .. import utils
 
 from qgis.PyQt.QtGui import QIcon, QColor
 
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (QgsProcessing,
                        QgsCategorizedSymbolRenderer,
                        QgsCoordinateTransformContext,
@@ -57,8 +57,6 @@ from qgis.core import (QgsProcessing,
                        QgsVectorFileWriter,
                        QgsVectorLayer,
                        QgsFeature)
-
-from PyQt5.QtCore import QVariant
 
 
 class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
@@ -212,15 +210,15 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             BuildYear_values, BuildCode_values, BBRArea_values, thermonet_values, feedback)
         
         # Step 6: Create updated features
-        updated_fields.append(QgsField("id.lokalId", QVariant.String))
-        updated_fields.append(QgsField("BBRUUID", QVariant.String))
-        updated_fields.append(QgsField("Thermonet", QVariant.String))
-        updated_fields.append(QgsField("BuildYear", QVariant.Int, "integer", len=4))
-        updated_fields.append(QgsField("BuildCode", QVariant.Int, "integer", len=3))
-        updated_fields.append(QgsField("BBRArea", QVariant.Int, "integer", len=10))
-        updated_fields.append(QgsField("YrHeatLoad", QVariant.Double, "double", len=10, prec=0))
-        updated_fields.append(QgsField("WiHeatLoad", QVariant.Double, "double", len=10, prec=0))
-        updated_fields.append(QgsField("DyHeatLoad", QVariant.Double, "double", len=10, prec=0))
+        updated_fields.append(QgsField("id.lokalId", QMetaType.Type.QString))
+        updated_fields.append(QgsField("BBRUUID", QMetaType.Type.QString))
+        updated_fields.append(QgsField("Thermonet", QMetaType.Type.QString))
+        updated_fields.append(QgsField("BuildYear", QMetaType.Type.Int, "integer", len=4))
+        updated_fields.append(QgsField("BuildCode", QMetaType.Type.Int, "integer", len=3))
+        updated_fields.append(QgsField("BBRArea", QMetaType.Type.Int, "integer", len=10))
+        updated_fields.append(QgsField("YrHeatLoad", QMetaType.Type.Double, "double", len=10, prec=0))
+        updated_fields.append(QgsField("WiHeatLoad", QMetaType.Type.Double, "double", len=10, prec=0))
+        updated_fields.append(QgsField("DyHeatLoad", QMetaType.Type.Double, "double", len=10, prec=0))
         
         geometries = [feature.geometry() for feature in input_features] # geometries for all features
         
@@ -471,11 +469,8 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         :rtype: float
         """
         
-        # Get the directory of the current Python script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        
         # Build the full path to the CSV file
-        heat_atlas_long_file = os.path.join(script_dir, 'heat_atlas_data_long_format_mapped.csv')
+        heat_atlas_long_file = utils.get_resource('heat_atlas_data_long_format_mapped.csv')
         
         # Check if the file exists
         if not os.path.exists(heat_atlas_long_file):
@@ -546,7 +541,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2b.png')))
-        return QIcon(utils.get_resource('logo2b.png'))
+        return QIcon(utils.get_logo('logo2b.png'))
 
     def shortHelpString(self):
         return ("<p><b> This tool: </b><p>"

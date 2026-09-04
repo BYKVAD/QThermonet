@@ -148,7 +148,7 @@ class ToggleThermonetAlgorithm(QgsProcessingAlgorithm):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2a.png')))
-        return QIcon(utils.get_resource('logo2a.png'))
+        return QIcon(utils.get_logo('logo2a.png'))
 
     def shortHelpString(self):
         return (
