@@ -1,6 +1,6 @@
 [general]
 name=QThermonet
-qgisMinimumVersion=3.0
+qgisMinimumVersion=4.0
 description=This plugin enables dimensioning of thermonets in QGIS using pythermonet.
 version=0.2.0
 author=Jane Lund Andersen/VIA University College
@@ -21,7 +21,7 @@ tags=python, energy, thermonet, heating network, cooling network, ground-source 
 
 homepage=https://github.com/jaluan/QThermonet
 category=Analysis
-icon=icon.png
+icon=resources/icon.png
 
 # experimental flag
 experimental=True

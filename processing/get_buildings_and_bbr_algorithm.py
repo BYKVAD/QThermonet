@@ -38,7 +38,7 @@ from osgeo import gdal
 import requests as rq
 from .. import utils
 from qgis.PyQt.QtGui import QIcon, QColor
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (
     edit,
     QgsCategorizedSymbolRenderer,
@@ -66,7 +66,6 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes
     )
-from PyQt5.QtCore import QVariant
 
 
 class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
@@ -260,11 +259,11 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo("Adding BBR information to output file ...")
 
         new_fields = [
-            QgsField("BuildYear", QVariant.Int),
-            QgsField("BuildCode", QVariant.Int),
-            QgsField("BBRArea", QVariant.Int),
-            QgsField("BuildHeat", QVariant.Int),
-            QgsField("FuelType", QVariant.Int)
+            QgsField("BuildYear", QMetaType.Type.Int),
+            QgsField("BuildCode", QMetaType.Type.Int),
+            QgsField("BBRArea", QMetaType.Type.Int),
+            QgsField("BuildHeat", QMetaType.Type.Int),
+            QgsField("FuelType", QMetaType.Type.Int)
         ]
 
         transformed_layer.startEditing()
@@ -516,7 +515,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         """
         layer_provider = layer.dataProvider()
         if layer_provider.fields().indexFromName("Thermonet") == -1:
-            layer_provider.addAttributes([QgsField("Thermonet", QVariant.String)])
+            layer_provider.addAttributes([QgsField("Thermonet", QMetaType.Type.QString)])
             layer.updateFields()
 
         expression = QgsExpression(
@@ -644,9 +643,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         return QCoreApplication.translate('Processing', string)
 
     def icon(self):
-        cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo2.png')))
-        return icon
+        return QIcon(utils.get_logo('logo2.png'))
 
     def shortHelpString(self):
         return (

@@ -430,7 +430,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo-servicep.png')))
-        return QIcon(utils.get_resource('logo-servicep.png'))
+        return QIcon(utils.get_logo('logo-servicep.png'))
   
     def shortHelpString(self):
         return (

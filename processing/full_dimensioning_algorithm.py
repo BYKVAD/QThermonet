@@ -400,7 +400,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo.png')))
-        return QIcon(utils.get_resource('logo.png'))
+        return QIcon(utils.get_logo('logo.png'))
     
     def shortHelpString(self):
         return ("<p> This tool performs full dimensioning of a thermonet using "

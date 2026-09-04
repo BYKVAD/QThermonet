@@ -154,4 +154,33 @@ PLUGIN_ROOT = Path(__file__).parent
 RESOURCES_DIR = PLUGIN_ROOT / "resources"
 
 def get_resource(filename: str) -> str:
+    """Build an absolute path to a file bundled in the plugin's resources folder.
+
+    Parameters
+    ----------
+    filename : str
+        Path relative to the ``resources/`` folder, e.g. ``"icon.png"`` or
+        ``"logos/logo2.png"``.
+
+    Returns
+    -------
+    str
+        Absolute filesystem path to the resource.
+    """
     return str(RESOURCES_DIR / filename)
+
+
+def get_logo(filename: str) -> str:
+    """Build an absolute path to a per-algorithm toolbar/menu icon.
+
+    Parameters
+    ----------
+    filename : str
+        Icon filename inside ``resources/logos/``, e.g. ``"logo2.png"``.
+
+    Returns
+    -------
+    str
+        Absolute filesystem path to the icon.
+    """
+    return get_resource(f"logos/{filename}")

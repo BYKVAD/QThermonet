@@ -246,7 +246,7 @@ class AggregatedLoadAlgorithm(QgsProcessingAlgorithm):
     def icon(self):
         # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
         # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'resources/logo3.png')))
-        return QIcon(utils.get_resource('logo3.png'))
+        return QIcon(utils.get_logo('logo3.png'))
     
     def shortHelpString(self):
         """
