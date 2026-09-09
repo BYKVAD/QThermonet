@@ -46,7 +46,7 @@ from qgis.core import (
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterFolderDestination
     )
-from ..utils import calculate_tc, fetch_api_data, get_representative_point
+from ..utils import calculate_tc, fetch_api_data, get_representative_point, get_logo
 
 
 class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
@@ -494,14 +494,14 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'Get ground conductivity'
+        return 'get_ground_conductivity'
 
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr('Get Ground Conductivity')
 
     def group(self):
         """
@@ -520,11 +520,17 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         """
         return '2. Thermonet'
 
+    def flags(self):
+        # matplotlib plotting isn't thread-safe in a Qt app; force this
+        # algorithm onto the main thread to avoid QGIS's AlgorithmWidget
+        # lifecycle crash (RuntimeError: wrapped C/C++ object ... deleted).
+        return super().flags() | QgsProcessingAlgorithm.FlagNoThreading
+
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
     
     def icon(self):
-        return QIcon(utils.get_logo('logo-thermalcond.png'))
+        return QIcon(get_logo('logo-thermalcond.png'))
     
     def shortHelpString(self):
         """

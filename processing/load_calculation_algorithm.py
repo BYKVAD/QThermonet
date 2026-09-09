@@ -56,6 +56,7 @@ from qgis.core import (QgsProcessing,
                        QgsSymbol,
                        QgsVectorFileWriter,
                        QgsVectorLayer,
+                       QgsWkbTypes,
                        QgsFeature)
 
 
@@ -355,27 +356,37 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "GeoJSON"  # Specify GeoJSON driver
         options.fileEncoding = "UTF-8"
-    
+
         # Ensure output filename has .geojson extension
         if not output_path.lower().endswith(".geojson"):
             output_path += ".geojson"
-    
-        writer = QgsVectorFileWriter.create(
+
+        # Build an actual layer (CRS inherited from input_layer) rather than
+        # writing raw fields/features via QgsVectorFileWriter.create() directly -
+        # that path was silently dropping the CRS from the output GeoJSON.
+        geometry_name = QgsWkbTypes.displayString(input_layer.wkbType())
+        output_layer = QgsVectorLayer(
+            f"{geometry_name}?crs={input_layer.sourceCrs().authid()}",
+            "heat_loads",
+            "memory"
+        )
+        output_provider = output_layer.dataProvider()
+        output_provider.addAttributes(fields)
+        output_layer.updateFields()
+        output_provider.addFeatures(updated_features)
+        output_layer.updateExtents()
+
+        error = QgsVectorFileWriter.writeAsVectorFormatV3(
+            output_layer,
             output_path,
-            fields,
-            input_layer.wkbType(),
-            input_layer.sourceCrs(),
             QgsCoordinateTransformContext(),
             options
         )
-    
-        if writer.hasError() != QgsVectorFileWriter.NoError:
+
+        error_code = error[0] if isinstance(error, tuple) else error
+        if error_code != QgsVectorFileWriter.NoError:
             raise QgsProcessingException("Failed to create output GeoJSON.")
-    
-        for feature in updated_features:
-            writer.addFeature(feature)
-    
-        del writer
+
         feedback.pushInfo(f"Output GeoJSON saved to: {output_path}")
         
 
@@ -509,14 +520,14 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'Calculate heatloads'
+        return 'load_calculation'
 
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr('Calculate Heat Loads')
 
     def group(self):
         """

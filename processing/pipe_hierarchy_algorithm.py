@@ -305,12 +305,15 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             feedback=feedback
         )['OUTPUT']
 
-        error = QgsVectorFileWriter.writeAsVectorFormat(
+        save_options = QgsVectorFileWriter.SaveVectorOptions()
+        save_options.driverName = "GeoJSON"
+        save_options.fileEncoding = "UTF-8"
+
+        error = QgsVectorFileWriter.writeAsVectorFormatV3(
             pipes_layer_wgs84,
             output_path,
-            "UTF-8",
-            pipes_layer_wgs84.crs(),
-            "GeoJSON"
+            context.transformContext(),
+            save_options
         )
         
         error_code = error[0] if isinstance(error, tuple) else error
@@ -534,10 +537,10 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         return connected_segments
   
     def name(self):
-        return 'Optional: Pipe hierarchy'
+        return 'pipe_hierarchy'
 
     def displayName(self):
-        return self.tr(self.name())
+        return self.tr('Optional: Pipe Hierarchy')
 
     def group(self):
         return self.tr(self.groupId())
