@@ -32,10 +32,9 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingParameterVectorLayer,
-    QgsProcessingParameterFeatureSink,
+    QgsProcessingParameterFileDestination,
     QgsProject,
     QgsFeature,
-    QgsFeatureSink,
     QgsGeometry,
     QgsFields,
     QgsWkbTypes,
@@ -45,10 +44,11 @@ from qgis.core import (
     QgsField,
     QgsPointXY,
     QgsPoint,
-    QgsLineSymbol, 
+    QgsLineSymbol,
     QgsGeometryGeneratorSymbolLayer,
     QgsMarkerSymbol,
     QgsSingleSymbolRenderer,
+    QgsVectorFileWriter,
     QgsVectorLayer
 )
 from qgis.PyQt.QtCore import QCoreApplication
@@ -102,9 +102,10 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(param)
         
         # Output
-        param = QgsProcessingParameterFeatureSink(
+        param = QgsProcessingParameterFileDestination(
                 self.OUTPUT_LAYER,
                 "Output Service Pipes",
+                fileFilter="GeoJSON (*.geojson)"
             )
         param.setHelp(
             "The output layer will contain the shortest distance service pipes "
@@ -139,7 +140,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         
         # Check if the output file is locked
         feedback.pushInfo("Checking output file destination ...")
-        output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT_LAYER, context)
+        output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_LAYER, context)
         if self.is_file_locked(output_path, feedback):
             raise QgsProcessingException(
                 f"The output file '{output_path}' is locked by QGIS and cannot be overwritten. "
@@ -168,20 +169,21 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
                 # Use default type/length/precision from input
                 output_fields.append(QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision()))
                                   
-        # Create the sink
-        feedback.pushInfo("Creating sink ...")
-        (sink, sink_id) = self.parameterAsSink(
-            parameters,
-            self.OUTPUT_LAYER,
-            context,
-            output_fields,
-            QgsWkbTypes.LineString,
-            buildings_layer.sourceCrs()
+        # Accumulate output features in memory, then write them out with
+        # writeAsVectorFormatV3 at the end - QgsProcessingParameterFeatureSink's
+        # own sink-creation machinery was the source of the GeoPackage/CRS bugs
+        # this tool hit under QGIS4 (see the QGIS4 migration plan doc).
+        feedback.pushInfo("Preparing output layer ...")
+        accumulator_layer = QgsVectorLayer(
+            f"LineString?crs={buildings_layer.sourceCrs().authid()}",
+            "service_pipes",
+            "memory"
         )
-        
-        if not sink:
-            raise QgsProcessingException("Invalid output sink.")
-                                      
+        accumulator_provider = accumulator_layer.dataProvider()
+        accumulator_provider.addAttributes(output_fields)
+        accumulator_layer.updateFields()
+        new_features = []
+
         # Create spatial index for pipes
         feedback.pushInfo("Building spatial index for pipes...")
         spatial_index = QgsSpatialIndex(pipes_layer.getFeatures())
@@ -242,37 +244,38 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             new_feature.setAttributes(
                 building.attributes() + closest_pipe_feature.attributes()
             )
-            sink.addFeature(new_feature, QgsFeatureSink.FastInsert)
-           
-        
-        # Apply symbology if the output layer is loaded
-        output_layer = context.getMapLayer(sink_id)
-        
-        if output_layer is None:
-            # Saved output layer: Load it manually
-            output_layer_path = self.parameterAsOutputLayer(parameters, self.OUTPUT_LAYER, context)
-            if output_layer_path:  # Ensure the path exists
-                output_layer = QgsVectorLayer(output_layer_path, "Service pipes", "ogr")
-                if output_layer.isValid():
-                    feedback.pushInfo("Applying symbology to layer...")
-                    QgsProject.instance().addMapLayer(output_layer)
-                    self.set_symbology(output_layer, feedback)
-                else:
-                    feedback.pushInfo("Output layer is not valid, symbology not applied")
-            else: 
-                feedback.pushInfo("Output layer path is not valid, symbology not applied")
-        else:
-            # Temporary output layer: Symbology is applied directly
-            feedback.pushInfo("Applying symbology to memory layer...")
-            self.set_symbology(output_layer, feedback)
-        
+            new_features.append(new_feature)
+
+        accumulator_provider.addFeatures(new_features)
+        accumulator_layer.updateExtents()
+
+        feedback.pushInfo("Writing output layer ...")
+        save_options = QgsVectorFileWriter.SaveVectorOptions()
+        save_options.driverName = "GeoJSON"
+        save_options.fileEncoding = "UTF-8"
+
+        error = QgsVectorFileWriter.writeAsVectorFormatV3(
+            accumulator_layer,
+            output_path,
+            context.transformContext(),
+            save_options
+        )
+        error_code = error[0] if isinstance(error, tuple) else error
+        if error_code != QgsVectorFileWriter.NoError:
+            raise QgsProcessingException(f"Failed to write output layer. Error: {error}")
+
+        # Load the written file and apply symbology
+        output_layer = QgsVectorLayer(output_path, "Service pipes", "ogr")
         if output_layer.isValid():
+            feedback.pushInfo("Applying symbology to layer...")
+            QgsProject.instance().addMapLayer(output_layer)
+            self.set_symbology(output_layer, feedback)
             feedback.pushInfo("Layer successfully created and symbology applied.")
         else:
-            feedback.pushInfo("Layer creation succeeded but was marked as invalid by QGIS.")
-           
+            feedback.pushInfo("Output layer is not valid, symbology not applied")
+
         feedback.pushInfo("Processing completed.")
-        return {self.OUTPUT_LAYER: sink_id}
+        return {self.OUTPUT_LAYER: output_path}
     
             
     def set_symbology(self, layer, feedback):
@@ -398,14 +401,14 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
 
 
     def name(self):
-        return "Shortest Service Pipes"
-    
+        return "service_pipes"
+
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr("Shortest Service Pipes")
 
     def group(self):
         """

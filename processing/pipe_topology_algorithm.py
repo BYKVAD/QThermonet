@@ -414,14 +414,14 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         return nearby_features
 
     def name(self):
-        return "Pipe Topology"
-    
+        return "pipe_topology"
+
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr("Pipe Topology")
 
     def group(self):
         """

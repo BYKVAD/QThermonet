@@ -76,7 +76,7 @@ class QThermonetPlugin(object):
         # icon_get_buildings = os.path.join(cmd_folder, 'logo2.png')
         self.action_get_buildings = QAction(
             QIcon(icon_get_buildings),
-            u"Get buildings and BBR information", self.iface.mainWindow())
+            u"Get Buildings and BBR Information", self.iface.mainWindow())
         self.action_get_buildings.triggered.connect(self.run_GetbuildingsinAOI)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_get_buildings)
         self.menu.addAction(self.action_get_buildings)
@@ -87,7 +87,7 @@ class QThermonetPlugin(object):
         # icon_toggle_thermonet = os.path.join(cmd_folder, 'logo2a.png')
         self.action_toggle_thermonet = QAction(
             QIcon(icon_toggle_thermonet),
-            u"Optional: Toggle thermonet buildings", self.iface.mainWindow())
+            u"Optional: Toggle Thermonet Buildings", self.iface.mainWindow())
         self.action_toggle_thermonet.triggered.connect(self.run_ToggleThermonet)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_toggle_thermonet)
         self.menu.addAction(self.action_toggle_thermonet)
@@ -98,7 +98,7 @@ class QThermonetPlugin(object):
         # icon_load_calculation = os.path.join(cmd_folder, 'logo2b.png')
         self.action_load_calculation = QAction(
             QIcon(icon_load_calculation),
-            u"Calculate heat loads", self.iface.mainWindow())
+            u"Calculate Heat Loads", self.iface.mainWindow())
         self.action_load_calculation.triggered.connect(self.run_LoadCalculation)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_load_calculation)
         self.menu.addAction(self.action_load_calculation)
@@ -119,7 +119,7 @@ class QThermonetPlugin(object):
         # icon_pipe_hierarchy = os.path.join(cmd_folder, 'logo6-pipes-simple.png')
         self.action_pipe_hierarchy = QAction(
             QIcon(icon_pipe_hierarchy),
-            u"Optional: Pipe hierarchy", self.iface.mainWindow())
+            u"Optional: Pipe Hierarchy", self.iface.mainWindow())
         self.action_pipe_hierarchy.triggered.connect(self.run_PipeHierarchy)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_pipe_hierarchy)
         self.menu.addAction(self.action_pipe_hierarchy)
@@ -130,7 +130,7 @@ class QThermonetPlugin(object):
         # icon_service_pipes = os.path.join(cmd_folder, 'logo-servicep.png')
         self.action_service_pipes = QAction(
             QIcon(icon_service_pipes),
-            u"Shortest service pipes", self.iface.mainWindow())
+            u"Shortest Service Pipes", self.iface.mainWindow())
         self.action_service_pipes.triggered.connect(self.run_ShortestServicePipes)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_service_pipes)
         self.menu.addAction(self.action_service_pipes)
@@ -140,7 +140,7 @@ class QThermonetPlugin(object):
         icon_ground_conductivity = utils.get_logo('logo-thermalcond.png')
         self.action_ground_conductivity = QAction(
             QIcon(icon_ground_conductivity),
-            u"Get ground conductivity", self.iface.mainWindow())
+            u"Get Ground Conductivity", self.iface.mainWindow())
         self.action_ground_conductivity.triggered.connect(self.run_GetGroundConductivity)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_ground_conductivity)
         self.menu.addAction(self.action_ground_conductivity)
@@ -151,7 +151,7 @@ class QThermonetPlugin(object):
         # icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
         self.action_pipe_topology = QAction(
             QIcon(icon_pipe_topology),
-            u"Pipe topology", self.iface.mainWindow())
+            u"Pipe Topology", self.iface.mainWindow())
         self.action_pipe_topology.triggered.connect(self.run_PipeTopology)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_pipe_topology)
         self.menu.addAction(self.action_pipe_topology)
@@ -162,7 +162,7 @@ class QThermonetPlugin(object):
         # icon_full_dimensioning = os.path.join(cmd_folder, 'logo.png')
         self.action_full_dimensioning = QAction(
             QIcon(icon_full_dimensioning),
-            u"Full dimensioning", self.iface.mainWindow())
+            u"Full Dimensioning", self.iface.mainWindow())
         self.action_full_dimensioning.triggered.connect(self.run_FullDimensioning)
         self.iface.addPluginToMenu(u"&QThermonet", self.action_full_dimensioning)
         self.menu.addAction(self.action_full_dimensioning)
@@ -217,31 +217,31 @@ class QThermonetPlugin(object):
         
             
     def run_GetbuildingsinAOI(self):
-        processing.execAlgorithmDialog("QThermonet:Get buildings and BBR information")
+        processing.execAlgorithmDialog("QThermonet:get_buildings_and_bbr")
         
     def run_ToggleThermonet(self):
-        processing.execAlgorithmDialog("QThermonet:Optional: Toggle thermonet buildings")
+        processing.execAlgorithmDialog("QThermonet:toggle_thermonet_buildings")
         
     def run_LoadCalculation(self):
-        processing.execAlgorithmDialog("QThermonet:Calculate heat loads")
+        processing.execAlgorithmDialog("QThermonet:load_calculation")
         
     # def run_AggregatedLoads(self):
     #     processing.execAlgorithmDialog("QThermonet:Calculate aggregated heat load")
     
     def run_PipeHierarchy(self):
-        processing.execAlgorithmDialog("QThermonet:Optional: Pipe hierarchy")
+        processing.execAlgorithmDialog("QThermonet:pipe_hierarchy")
         
     def run_ShortestServicePipes(self):
-        processing.execAlgorithmDialog("QThermonet:Shortest Service Pipes")
+        processing.execAlgorithmDialog("QThermonet:service_pipes")
         
     def run_GetGroundConductivity(self):
-        processing.execAlgorithmDialog("QThermonet:Get ground conductivity")
+        processing.execAlgorithmDialog("QThermonet:get_ground_conductivity")
 
     def run_PipeTopology(self):
-        processing.execAlgorithmDialog("QThermonet:Pipe Topology")
+        processing.execAlgorithmDialog("QThermonet:pipe_topology")
                 
     def run_FullDimensioning(self):
-        processing.execAlgorithmDialog("QThermonet:Full dimensioning")
+        processing.execAlgorithmDialog("QThermonet:full_dimensioning")
         
     # def run_qpythermonet(self):
     #     processing.execAlgorithmDialog("QThermonet:Dimension sources")

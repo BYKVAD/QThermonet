@@ -96,7 +96,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterString(
                 self.BBR_UID,
                 self.tr("Username for Datafordeler:"),
-                defaultValue='DUMMY'
+                defaultValue='XGRDWJKLKW'
             )
         param.setHelp(
             "Create your username at https://datafordeler.dk:\n"
@@ -107,7 +107,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterString(
                 self.BBR_PW,
                 self.tr("Password for Datafordeler:"),
-                defaultValue='DUMMY'
+                defaultValue='413Aries413!'
             )
         param.setHelp(
             "Create your password at https://datafordeler.dk:\n"
@@ -291,12 +291,15 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         # --------------------------------------------------
         feedback.pushInfo("Exporting buildings to output file...")
 
-        error = QgsVectorFileWriter.writeAsVectorFormat(
+        save_options = QgsVectorFileWriter.SaveVectorOptions()
+        save_options.driverName = "GeoJSON"
+        save_options.fileEncoding = "UTF-8"
+
+        error = QgsVectorFileWriter.writeAsVectorFormatV3(
             transformed_layer,
             output_path,
-            "UTF-8",
-            transformed_layer.crs(),
-            "GeoJSON"
+            context.transformContext(),
+            save_options
         )
 
         error_code = error[0] if isinstance(error, tuple) else error
@@ -450,12 +453,15 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
                             new_roads_layer.updateExtents()
 
-                            error = QgsVectorFileWriter.writeAsVectorFormat(
+                            save_options = QgsVectorFileWriter.SaveVectorOptions()
+                            save_options.driverName = "GeoJSON"
+                            save_options.fileEncoding = "UTF-8"
+
+                            error = QgsVectorFileWriter.writeAsVectorFormatV3(
                                 new_roads_layer,
                                 output_roads_path,
-                                "UTF-8",
-                                new_roads_layer.crs(),
-                                "GeoJSON"
+                                context.transformContext(),
+                                save_options
                             )
 
                             error_code = error[0] if isinstance(error, tuple) else error
@@ -613,14 +619,14 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'Get buildings and BBR information'
+        return 'get_buildings_and_bbr'
 
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr('Get Buildings and BBR Information')
 
     def group(self):
         """

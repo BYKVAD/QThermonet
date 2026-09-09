@@ -288,8 +288,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                         
         # Handle pipe catalogue file
         feedback.pushInfo("Handling pipe file...")
-        d_pipes = load_pipe_catalogue().values / 1000 # Convert d_pipes from mm to m
-        
+        d_pipes = load_pipe_catalogue()["Pipe diameters (mm)"].to_numpy() / 1000        
         
         # Set brine properties
         feedback.pushInfo("Setting brine properties...")
@@ -368,14 +367,14 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return 'Full dimensioning'
+        return 'full_dimensioning'
 
     def displayName(self):
         """
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr(self.name())
+        return self.tr('Full Dimensioning')
 
     def group(self):
         """
