@@ -42,6 +42,7 @@ from qgis.core import QgsApplication
 from qgis import processing
 from .provider import QThermonetProvider
 from ..settings_editor_dialog import SettingsEditorDialog
+from ..source_placement_dialog import SourcePlacementDialog
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
@@ -157,6 +158,16 @@ class QThermonetPlugin(object):
         self.menu.addAction(self.action_settings_editor)
         self.plugin_actions.append(self.action_settings_editor)
 
+        # Tool: Source Placement (not a Processing algorithm - opens a plain dialog)
+        icon_source_placement = utils.get_logo('logo-source-placement.svg')
+        self.action_source_placement = QAction(
+            QIcon(icon_source_placement),
+            u"Source Placement", self.iface.mainWindow())
+        self.action_source_placement.triggered.connect(self.run_SourcePlacement)
+        self.iface.addPluginToMenu(u"&QThermonet", self.action_source_placement)
+        self.menu.addAction(self.action_source_placement)
+        self.plugin_actions.append(self.action_source_placement)
+
         # Tool: Pipe topology
         icon_pipe_topology = utils.get_logo('logo6-pipes-alt.png')
         # icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
@@ -250,6 +261,10 @@ class QThermonetPlugin(object):
 
     def run_SettingsEditor(self):
         dlg = SettingsEditorDialog(self.iface.mainWindow())
+        dlg.exec()
+
+    def run_SourcePlacement(self):
+        dlg = SourcePlacementDialog(self.iface, self.iface.mainWindow())
         dlg.exec()
 
     def run_PipeTopology(self):

@@ -22,6 +22,8 @@
  ***************************************************************************/
 """
 
+from __future__ import annotations
+
 __author__ = 'Jane Lund Andersen/VIA University College'
 __date__ = '2025-06-10'
 __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
@@ -30,6 +32,9 @@ __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
 
 __revision__ = '$Format:%H$'
 
+import os
+import tempfile
+
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
@@ -37,7 +42,8 @@ from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingException,
                        QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
-                       QgsProcessingParameterString)
+                       QgsProcessingParameterString,
+                       QgsVectorLayer)
 
 from .. import utils
 from ..settings_editor_dialog import ROLES_BHE, ROLES_HHE, detect_mode
@@ -63,6 +69,58 @@ from pythermonet.input import (
     read_undimensioned_topology_tsv,
 )
 from pythermonet.output import print_bhe_results, print_hhe_results
+
+
+def _borefield_geojson_to_dat(geojson_path: str) -> str:
+    """Convert a Source Placement borefield GeoJSON to a WKT/EWKT ``.dat``.
+
+    pythermonet's own `read_borefield_coordinates_tsv` only understands the
+    WKT/EWKT TSV format, not GeoJSON. This bridges the GeoJSON layer
+    QThermonet's "Source Placement" tool produces (see
+    ``claude/handoffs/handoff-interactive-borefield-placement.md``) to that
+    format, run fresh on every algorithm call so the ``.dat`` can never go
+    stale relative to the layer -- there is no persisted ``.dat`` to
+    maintain in parallel.
+
+    Parameters
+    ----------
+    geojson_path : str
+        Path to a borefield GeoJSON: point features with an ``id``
+        attribute (matching the ``.dat``'s ``ID`` column).
+
+    Returns
+    -------
+    str
+        Path to a newly created temporary ``.dat`` file. Caller is
+        responsible for deleting it.
+
+    Raises
+    ------
+    QgsProcessingException
+        If the GeoJSON can't be loaded or is missing the ``id`` field.
+
+    """
+    layer = QgsVectorLayer(geojson_path, "borefield", "ogr")
+    if not layer.isValid():
+        raise QgsProcessingException(f"Could not load borefield GeoJSON: {geojson_path}")
+
+    if "id" not in [field.name() for field in layer.fields()]:
+        raise QgsProcessingException(
+            f"Borefield GeoJSON is missing the required 'id' field: {geojson_path}"
+        )
+
+    srid = layer.crs().authid().split(":")[-1]
+    fd, dat_path = tempfile.mkstemp(suffix=".dat")
+    os.close(fd)
+    with open(dat_path, "w", encoding="utf-8") as dat_file:
+        dat_file.write("ID\tWKT\n")
+        for feature in layer.getFeatures():
+            point = feature.geometry().asPoint()
+            dat_file.write(
+                f"{feature['id']}\tSRID={srid};POINT ({point.x()} {point.y()})\n"
+            )
+
+    return dat_path
 
 
 class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
@@ -130,17 +188,20 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(param)
 
-        # Borehole coordinates file (only used when the settings file above is BHE)
+        # Borefield layer (only used when the settings file above is BHE)
         param = QgsProcessingParameterFile(
                 self.BOREHOLE_COORDINATES_FILE,
-                self.tr("Borehole coordinates file (BHE only):"),
-                extension="dat",
+                self.tr("Borefield layer (BHE only):"),
+                extension="geojson",
                 optional=True
             )
         param.setHelp(
-            "WKT/EWKT borehole coordinates file (ID, WKT columns; SRID= "
-            "prefix required). Required when the settings file above is a "
-            "BHE settings file; ignored for HHE.\n"
+            "GeoJSON borefield layer, as produced by the 'Source Placement' "
+            "tool: point features with an 'id' attribute (one flagged "
+            "'is_connection_node'). Converted internally to the WKT/EWKT "
+            "format pythermonet reads, fresh on every run. Required when "
+            "the settings file above is a BHE settings file; ignored for "
+            "HHE.\n"
         )
         self.addParameter(param)
 
@@ -236,7 +297,11 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
 
         if he_mode == "BHE":
             feedback.pushInfo("Performing BHE sizing...")
-            borefield_input = read_borefield_coordinates_tsv(borefield_file)
+            dat_path = _borefield_geojson_to_dat(borefield_file)
+            try:
+                borefield_input = read_borefield_coordinates_tsv(dat_path)
+            finally:
+                os.remove(dat_path)
             coordinates = localize_borefield_coordinates(borefield_input)
 
             grout = settings["grout"]
@@ -356,8 +421,9 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 "tool. Its own content determines whether this run is BHE "
                 "or HHE -- a project can keep both a BHE and an HHE "
                 "settings file to explore both. <p>"
-                "4. Borehole coordinates file: required only when the "
-                "settings file above is a BHE settings file. <p>"
+                "4. Borefield layer (GeoJSON): required only when the "
+                "settings file above is a BHE settings file. Can be "
+                "created using the 'Source Placement' tool. <p>"
                 "<p><b> Output:</b> Input parameters and results are stored in an output "
                 "report.dat file (not yet implemented). <p>"
                 "<p> <b> References: </b> <p>"
