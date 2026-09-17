@@ -30,47 +30,50 @@ __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
 
 __revision__ = '$Format:%H$'
 
-import os
-import inspect
-from .. import utils
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
-from qgis.core import (QgsProcessing,
-                       QgsProcessingAlgorithm,
+from qgis.core import (QgsProcessingAlgorithm,
                        QgsProcessingException,
-                       QgsProcessingParameterDefinition,
-                       QgsProcessingParameterEnum,
-                       QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
-                       QgsProcessingParameterNumber,
                        QgsProcessingParameterString)
 
-from pythermonet.data.equipment.pipes import load_pipe_catalogue
-from pythermonet.io import (
-    combine_heatpump_user_and_file,
-    read_heat_pump_tsv,
-    read_undimensioned_topology_tsv_to_net
+from .. import utils
+from ..settings_editor_dialog import ROLES_BHE, ROLES_HHE, detect_mode
+
+from pythermonet.components import (
+    build_distribution_network,
+    build_pipe_infrastructure,
+    build_vhe_field,
+    ground_loads_from_heat_pumps,
+    localize_borefield_coordinates,
 )
-from pythermonet.core.main import run_full_dimensioning
-from pythermonet.domain import BHEConfig, HHEConfig, Brine, HeatPump, Thermonet
-from ..utils import calculate_tc, get_representative_point
+from pythermonet.dimensioning import (
+    HHEGroundField,
+    run_bhe_sizing_workflow,
+    run_hhe_sizing_workflow,
+    run_pipedimensioning,
+)
+from pythermonet.input import (
+    load_settings,
+    read_borefield_coordinates_tsv,
+    read_heat_pumps_tsv,
+    read_pipe_catalog,
+    read_undimensioned_topology_tsv,
+)
+from pythermonet.output import print_bhe_results, print_hhe_results
 
 
 class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
-    
+
     #Handle input/output
-    PID="PID"
+    PID = "PID"
     OUTPUT = 'OUTPUT'
     INPUT_LOAD = 'INPUT_LOAD'
     INPUT_Topology = 'INPUT_Topology'
-    HE_MODE = "HE_MODE"
-    # INPUT_Brine = 'INPUT_Brine'
-    # rhoBrine = "rhoBrine"
-    # cBrine = "cBrine"
-    # muBrine = "muBrine"
-    # lBrine = "lBrine"
+    SETTINGS_FILE = "SETTINGS_FILE"
+    BOREHOLE_COORDINATES_FILE = "BOREHOLE_COORDINATES_FILE"
 
     def initAlgorithm(self, config=None):
         """
@@ -85,8 +88,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             "Name of the project (string)\n"
         )
         self.addParameter(param)
-        
-        
+
+
         # Input file for specifying load for heating/cooling
         param = QgsProcessingParameterFile(
                 self.INPUT_LOAD,
@@ -97,8 +100,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             "Heating and/or cooling loads for each heat pump (.dat)\n"
         )
         self.addParameter(param)
-        
-        
+
+
         # Input file containing topology information
         param = QgsProcessingParameterFile(
                 self.INPUT_Topology,
@@ -110,117 +113,37 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             " and hierarchy/level assigned (.dat)\n"
         )
         self.addParameter(param)
-        
-        # Add a dropdown menu parameter
-        param = QgsProcessingParameterEnum(
-                self.HE_MODE,
-                description="Select heat exchanger source mode",
-                options=["BHE", "HHE"],  # Options for the dropdown menu
-                defaultValue=0  # Default selection index (0 corresponds to "BHE")
+
+        # Settings file (physical/material parameters for this project)
+        param = QgsProcessingParameterFile(
+                self.SETTINGS_FILE,
+                self.tr("Settings file:"),
+                extension="json"
             )
         param.setHelp(
-            "Choose whether you would like the source to be configured as a "
-            "Borehole Heat Exchanger (BHE) or a Horizontal Heat Exchanger (HHE)"
+            "Project settings file (.json) created/edited with the "
+            "'Dimensioning Settings' tool. Holds every physical/material "
+            "parameter (pipes, brine, soil, sizing, ...) for this project. "
+            "Its own content determines whether this run is BHE or HHE -- "
+            "a project can keep both a BHE and an HHE settings file to "
+            "explore both, and you pick which one to run here.\n"
         )
         self.addParameter(param)
-        
-        # Ground thermal conductivity method selection
-        param = QgsProcessingParameterEnum(
-            'TC_METHOD',
-            '── THERMAL CONDUCTIVITY ── Method',
-            options = ['Calculate from geology (GEUS API)', 'Enter manually'],
-            defaultValue = 1
-        )
+
+        # Borehole coordinates file (only used when the settings file above is BHE)
+        param = QgsProcessingParameterFile(
+                self.BOREHOLE_COORDINATES_FILE,
+                self.tr("Borehole coordinates file (BHE only):"),
+                extension="dat",
+                optional=True
+            )
         param.setHelp(
-            '───────────────────────────────────────────────\n'
-            'GROUND THERMAL CONDUCTIVITY SETTINGS\n'
-            '───────────────────────────────────────────────\n'
-            'Choose whether to calculate ground thermal conductivity '
-            'from the GEUS API or enter a value manually.'
+            "WKT/EWKT borehole coordinates file (ID, WKT columns; SRID= "
+            "prefix required). Required when the settings file above is a "
+            "BHE settings file; ignored for HHE.\n"
         )
-        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
         self.addParameter(param)
-        
-        # Manual input value - optional, only used if method = manual
-        param = QgsProcessingParameterNumber(
-            'TC_MANUAL',
-            '── THERMAL CONDUCTIVITY ── Manual value (W/m·K)',
-            type         = QgsProcessingParameterNumber.Double,
-            defaultValue = 2.0,
-            minValue     = 0.1,
-            maxValue     = 10.0,
-            optional     = True
-        )
-        param.setHelp('Only used if "Enter manually" is selected above. Typical values range from 1.5 to 3.5 W/m·K.')
-        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
-        self.addParameter(param)
-        
-        param = QgsProcessingParameterFeatureSource(
-            'TC_AOI',
-            '── THERMAL CONDUCTIVITY ── AOI (polygon, line or point)',
-            [QgsProcessing.TypeVectorPolygon,
-             QgsProcessing.TypeVectorLine,
-             QgsProcessing.TypeVectorPoint],
-            optional = True
-        )
-        param.setHelp('Only used if "Calculate from geology (GEUS API)" is selected. Must contain a single feature.')
-        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
-        self.addParameter(param)
-        
-        # # Input file containing brine information
-        # self.addParameter(
-        #     QgsProcessingParameterFile(
-        #         self.INPUT_Brine,
-        #         self.tr("Input brine file:"),
-        #         extension="dat"  # Restrict selection to dat files
-        #     )
-        # )
-        
-        
-        # # Input numerical values for brine density
-        # self.addParameter(
-        #     QgsProcessingParameterNumber(
-        #         self.rhoBrine,
-        #         "Brine density (kg/m3), T = 0C",
-        #         type=QgsProcessingParameterNumber.Integer,
-        #         defaultValue=965,
-        #         minValue=0
-        #     )
-        # )
-        
-        # # Input numerical values for brine specific heat
-        # self.addParameter(
-        #     QgsProcessingParameterNumber(
-        #         self.cBrine,
-        #         "Brine specific heat (J/kg/K)",
-        #         type=QgsProcessingParameterNumber.Integer,
-        #         defaultValue=4450,
-        #         minValue=0
-        #     )
-        # )
-        
-        # # Input numerical values for brine dynamic viscosity
-        # self.addParameter(
-        #     QgsProcessingParameterNumber(
-        #         self.muBrine,
-        #         "Brine dynamic viscosity (Pa*s)",
-        #         type=QgsProcessingParameterNumber.Double,
-        #         defaultValue=5e-3,
-        #         minValue=0
-        #     )
-        # )
-        
-        # # Input numerical values for brine thermal conductivity 
-        # self.addParameter(
-        #     QgsProcessingParameterNumber(
-        #         self.lBrine,
-        #         "Brine thermal conductivity (W/m/K)",
-        #         type=QgsProcessingParameterNumber.Double,
-        #         defaultValue=0.45,
-        #         minValue=0.0
-        #     )
-        # )
-        
+
         # Output file
         self.addParameter(
             QgsProcessingParameterFileDestination(
@@ -232,123 +155,144 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
 
     def processAlgorithm(self, parameters, context, feedback):
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
-        PID = self.parameterAsString(parameters,self.PID,context)
-        he_mode_index = self.parameterAsEnum(parameters, self.HE_MODE, context)
-        # rho_brine = self.parameterAsInt(parameters,self.rhoBrine, context)
-        # c_brine = self.parameterAsInt(parameters,self.cBrine, context)
-        # mu_brine = self.parameterAsDouble(parameters,self.muBrine, context)
-        # l_brine = self.parameterAsDouble(parameters,self.lBrine, context)
-        
-        #Handle input layers
-        feedback.pushInfo("Checking input layers...")
+        PID = self.parameterAsString(parameters, self.PID, context)
+
+        #Handle input files
+        feedback.pushInfo("Checking input files...")
         HP_file = self.parameterAsFile(parameters, self.INPUT_LOAD, context)
         if not HP_file:
             raise QgsProcessingException("Invalid heat/cooling load input file!")
-            
+
         TOPO_file = self.parameterAsFile(parameters, self.INPUT_Topology, context)
         if not TOPO_file:
             raise QgsProcessingException("Invalid topology input file!")
-            
-        # Retrieve TC method and calculate or retrieve manual value
-        tc_method = self.parameterAsEnum(parameters, 'TC_METHOD', context)
-        
-        if tc_method == 0:
-            #initial depth estimate
-            if he_mode_index == 0:  #BHE
-                depth = 200         #meter, hardcoded for now, later adjust depth with BHE depth
-            else:                   #HHE
-                depth = 2           #meter, hardcoded for now, later adjust depth with HHE depth
-            
-            # Get AOI layer and extract coordinates
-            tc_aoi = self.parameterAsVectorLayer(parameters, 'TC_AOI', context)
-            if tc_aoi is None:
-                raise QgsProcessingException(
-                    "An AOI layer must be provided when using the GEUS API method!"
-                )
-            try:
-                centerX, centerY = get_representative_point(tc_aoi)
-                feedback.pushInfo(f"Coordinates (EPSG:25832): X={centerX}, Y={centerY}")
-            except ValueError as e:
-                raise QgsProcessingException(str(e))
 
-            # Calculate from GEUS API
-            feedback.pushInfo("Calculating ground thermal conductivity from GEUS API ...")
-            tc = calculate_tc(centerX, centerY, depth) #centerX, centerY, input_depth
-            if tc is not None:
-                feedback.pushInfo(f"Ground thermal conductivity: {tc:.2f} W/m·K")
-            else:
-                raise QgsProcessingException(
-                    "Could not retrieve ground thermal conductivity from the GEUS API. "
-                    "Check that the AOI is within Denmark and try again."
-                )
-        else:
-            # Use manually entered value
-            tc = self.parameterAsDouble(parameters, 'TC_MANUAL', context)
-            feedback.pushInfo(f"Ground thermal conductivity (manual input): {tc:.2f} W/m·K")
-                        
-        # Handle pipe catalogue file
-        feedback.pushInfo("Handling pipe file...")
-        d_pipes = load_pipe_catalogue()["Pipe diameters (mm)"].to_numpy() / 1000        
-        
-        # Set brine properties
-        feedback.pushInfo("Setting brine properties...")
-        # brine_file = self.parameterAsFile(parameters, self.INPUT_Brine, context)
-        # if not brine_file:
-        #     raise QgsProcessingException("Invalid brine input file!")
-        # brine = Brine(rho_brine,c_brine,mu_brine,l_brine)
-        brine = Brine(rho=965, c=4450, mu=5e-3, l=0.45)
-        
-        # Initialise thermonet object
-        feedback.pushInfo("Initializing thermonet object...")
-        net = Thermonet(
-            D_gridpipes=0.3,
-            l_p=0.4,
-            l_s_H=tc, #1.25, Thermal conductivity from GEUS API call
-            l_s_C=tc, #1.25, Thermal conductivity from GEUS API call
-            rhoc_s=2.5e6,
-            z_grid=1.2,
-            T0=9.03,
-            A=7.90
+        settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
+        if not settings_path:
+            raise QgsProcessingException("Invalid settings file!")
+
+        borefield_file = self.parameterAsFile(parameters, self.BOREHOLE_COORDINATES_FILE, context)
+
+        # Load and validate the settings file
+        feedback.pushInfo("Loading settings file...")
+        try:
+            settings = load_settings(settings_path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise QgsProcessingException(str(exc))
+
+        # The settings file's own content determines BHE vs HHE -- no
+        # separate mode dropdown, so a project can keep both a BHE and an
+        # HHE settings file and this just picks whichever one was chosen.
+        he_mode = detect_mode(settings)
+        if he_mode is None:
+            raise QgsProcessingException(
+                "This settings file doesn't contain any role recognized as "
+                "BHE- or HHE-specific, so its mode can't be determined."
+            )
+        feedback.pushInfo(f"Project: {PID} (detected {he_mode} mode from settings file)")
+
+        required_roles = ROLES_BHE if he_mode == "BHE" else ROLES_HHE
+        missing_roles = [role for role in required_roles if role not in settings]
+        if missing_roles:
+            raise QgsProcessingException(
+                f"Settings file is missing the following role(s) required "
+                f"for {he_mode} mode: {', '.join(missing_roles)}"
+            )
+
+        if he_mode == "BHE" and not borefield_file:
+            raise QgsProcessingException(
+                "A borehole coordinates file must be provided when the "
+                "settings file is a BHE settings file!"
+            )
+
+        brine = settings["brine"]
+        soil = settings["soil"]
+        sizing = settings["sizing_parameters"]
+        brine_temperature_limits = settings["brine_temperature_limits"]
+
+        # Build the distribution network
+        feedback.pushInfo("Building distribution network...")
+        pipe_material_dist = settings["pipe_material_dist"]
+        network_parameters = settings["distribution_network_parameters"]
+        topology = read_undimensioned_topology_tsv(TOPO_file)
+        distribution_network_undimensioned = build_distribution_network(
+            topology,
+            pipe_material=pipe_material_dist,
+            network_parameters=network_parameters,
         )
 
-        # Read remaining data from user specified file
-        net, pipeGroupNames = read_undimensioned_topology_tsv_to_net(
-            TOPO_file, net
+        # Read heat pumps and compute ground loads
+        feedback.pushInfo("Reading heat pumps and computing ground loads...")
+        hp_list = read_heat_pumps_tsv(path=HP_file)
+        peak_supply = settings["heat_pump_peak_supply_parameters"]
+        loads = ground_loads_from_heat_pumps(hp_list, brine=brine, peak_supply=peak_supply)
+
+        # Hydraulic (pipe) dimensioning - mode independent
+        feedback.pushInfo("Dimensioning pipes...")
+        pipe_catalog = read_pipe_catalog()
+        hydraulic = run_pipedimensioning(
+            pipe_catalog, brine, distribution_network_undimensioned, hp_list
         )
-        
-        # Initialise heat pump object
-        feedback.pushInfo("Initializing heat pump object...")
-        heat_pump = HeatPump(
-            Ti_H=-3,
-            Ti_C=20,
-            f_peak_H=1,
-            t_peak_H=4,
-            f_peak_C=1,
-            t_peak_C=4
-        )
-        # Read remaining data from user specified file
-        heat_pump_input = read_heat_pump_tsv(HP_file)
-        heat_pump = combine_heatpump_user_and_file(heat_pump, heat_pump_input)
-        
-        # Heat source (either BHE or HHE)
-        feedback.pushInfo("Setting heat source configuration...")
-        # Map the index to the corresponding option
-        he_mode = ["BHE", "HHE"][he_mode_index]
+
         if he_mode == "BHE":
-            feedback.pushInfo("Performing BHE configuration...")
-            # source_config = BHEConfig(q_geo = 0.0185, r_b=0.152/2, r_p=0.02, SDR=11, l_ss=2.36, rhoc_ss=2.65e6, l_g=1.75, rhoc_g=3e6, D_pipes=0.015, NX=1, D_x=15, NY=6, D_y=15, gFuncMethod='ICS')
-            source_config = BHEConfig(q_geo = 0.0185, r_b=0.152/2, r_p=0.02, SDR=11, l_ss=tc, rhoc_ss=2.65e6, l_g=1.75, rhoc_g=3e6, D_pipes=0.015, NX=1, D_x=15, NY=6, D_y=15, gFuncMethod='ICS')
+            feedback.pushInfo("Performing BHE sizing...")
+            borefield_input = read_borefield_coordinates_tsv(borefield_file)
+            coordinates = localize_borefield_coordinates(borefield_input)
+
+            grout = settings["grout"]
+            pipe_material_bhe = settings["pipe_material_bhe"]
+            borehole = settings["borehole"]
+            pipe_segment_bhe = settings["pipe_segment_bhe"]
+            vhe_field_parameters = settings["vhe_field_parameters"]
+
+            vhe_field = build_vhe_field(
+                segment_parameters=pipe_segment_bhe,
+                field_parameters=vhe_field_parameters,
+                pipe_material=pipe_material_bhe,
+                borehole=borehole,
+                grout=grout,
+                coordinates=coordinates,
+            )
+
+            result = run_bhe_sizing_workflow(
+                ground_loads=loads,
+                vhe_field=vhe_field,
+                hydraulic=hydraulic,
+                brine=brine,
+                soil=soil,
+                sizing=sizing,
+                brine_temperature_limits=brine_temperature_limits,
+            )
+            print_bhe_results(result)
         else:
-            feedback.pushInfo("Performing HHE configuration...")
-            source_config = HHEConfig(N_HHE=6, d=0.04, SDR=17, D=1.5)
-            
-        # Full dimensioning of pipes and sources - results printed to console
-        feedback.pushInfo("Dimensioning pipes and sources...")
-        run_full_dimensioning(PID, d_pipes, brine, net, heat_pump, pipeGroupNames, source_config)
-        
-        # print_project_id(PID)
-        # print_source_dimensions(source_config,net)
-        
+            feedback.pushInfo("Performing HHE sizing...")
+            pipe_material_hhe = settings["pipe_material_hhe"]
+            pipe_segment_hhe = settings["pipe_segment_hhe"]
+            pipe_infrastructure_parameters_hhe = settings["pipe_infrastructure_hhe"]
+
+            pipe_infrastructure_hhe = build_pipe_infrastructure(
+                segment_parameters=pipe_segment_hhe,
+                infrastructure_parameters=pipe_infrastructure_parameters_hhe,
+                pipe_material=pipe_material_hhe,
+            )
+            hhe_field = HHEGroundField(
+                pipe_infrastructure=pipe_infrastructure_hhe,
+                soil_thermal_conductivity_heating=float(soil.thermal_conductivity_shallow_heating),
+                soil_thermal_conductivity_cooling=float(soil.thermal_conductivity_shallow_cooling),
+            )
+
+            result = run_hhe_sizing_workflow(
+                ground_loads=loads,
+                hhe_field=hhe_field,
+                pipe_infrastructure=pipe_infrastructure_hhe,
+                hydraulic=hydraulic,
+                brine=brine,
+                soil=soil,
+                sizing=sizing,
+                brine_temperature_limits=brine_temperature_limits,
+            )
+            print_hhe_results(result, pipe_infrastructure_hhe)
+
         # # Write to output file
         # feedback.pushInfo("Writing output...")
         # with open(output_path, "w", newline="") as csv_file:
@@ -356,7 +300,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         #     writer.writerows(table_content)
 
         feedback.pushInfo("Processing complete!")
-        
+
         return {self.OUTPUT: output_path}
 
     def name(self):
@@ -395,12 +339,10 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
-    
+
     def icon(self):
-        # cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-        # icon = QIcon(os.path.join(os.path.join(cmd_folder, 'logo.png')))
         return QIcon(utils.get_logo('logo.png'))
-    
+
     def shortHelpString(self):
         return ("<p> This tool performs full dimensioning of a thermonet using "
                 "Pythermonet to size pipes and sources."
@@ -409,18 +351,21 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 "2. Pipe network topology: Topology of pipes and service pipes "
                 "in thermonet circulating fluid to heatpumps/buildings. "
                 "Can be created using the 'Pipe Topology' tool. <p>"
-                "3. Heat exchanger source mode: Borehole (BHE) or Horizontal (HHE)"
+                "3. Settings file: physical/material parameters for the "
+                "project, created/edited with the 'Dimensioning Settings' "
+                "tool. Its own content determines whether this run is BHE "
+                "or HHE -- a project can keep both a BHE and an HHE "
+                "settings file to explore both. <p>"
+                "4. Borehole coordinates file: required only when the "
+                "settings file above is a BHE settings file. <p>"
                 "<p><b> Output:</b> Input parameters and results are stored in an output "
                 "report.dat file (not yet implemented). <p>"
-                "<p><b> Advanced parameters: </b> "
-                "Thermal conductivity method, manual value, and AOI. "
-                "(not fully implemented) <p>"
                 "<p> <b> References: </b> <p>"
                 "<p> Erbs Poulsen, S., & Tordrup, K. (2025). An integrated design "
                 "model for ambient temperature district heating and cooling networks. "
                 "Science and Technology for the Built Environment, 31(8), 879–888. "
-                "<a href=\"https://doi.org/10.1080/23744731.2025.2523198\">https://doi.org/10.1080/23744731.2025.2523198</a>.<p>" 
-                "<p> Code on GitHub: <a href=\"https://github.com/BYKVAD/pythermonetII\">https://github.com/BYKVAD/pythermonetII</a>.<p>"
+                "<a href=\"https://doi.org/10.1080/23744731.2025.2523198\">https://doi.org/10.1080/23744731.2025.2523198</a>.<p>"
+                "<p> Code on GitHub: <a href=\"https://github.com/BYKVAD/pythermonet\">https://github.com/BYKVAD/pythermonet</a>.<p>"
                 )
 
     def createInstance(self):

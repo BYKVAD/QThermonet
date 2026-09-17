@@ -41,6 +41,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.core import QgsApplication
 from qgis import processing
 from .provider import QThermonetProvider
+from ..settings_editor_dialog import SettingsEditorDialog
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
@@ -146,6 +147,16 @@ class QThermonetPlugin(object):
         self.menu.addAction(self.action_ground_conductivity)
         self.plugin_actions.append(self.action_ground_conductivity)
         
+        # Tool: Dimensioning Settings (not a Processing algorithm - opens a plain dialog)
+        icon_settings_editor = utils.get_logo('logo-settings.svg')
+        self.action_settings_editor = QAction(
+            QIcon(icon_settings_editor),
+            u"Dimensioning Settings", self.iface.mainWindow())
+        self.action_settings_editor.triggered.connect(self.run_SettingsEditor)
+        self.iface.addPluginToMenu(u"&QThermonet", self.action_settings_editor)
+        self.menu.addAction(self.action_settings_editor)
+        self.plugin_actions.append(self.action_settings_editor)
+
         # Tool: Pipe topology
         icon_pipe_topology = utils.get_logo('logo6-pipes-alt.png')
         # icon_pipe_topology = os.path.join(cmd_folder, 'logo6-pipes-alt.png')
@@ -236,6 +247,10 @@ class QThermonetPlugin(object):
         
     def run_GetGroundConductivity(self):
         processing.execAlgorithmDialog("QThermonet:get_ground_conductivity")
+
+    def run_SettingsEditor(self):
+        dlg = SettingsEditorDialog(self.iface.mainWindow())
+        dlg.exec()
 
     def run_PipeTopology(self):
         processing.execAlgorithmDialog("QThermonet:pipe_topology")

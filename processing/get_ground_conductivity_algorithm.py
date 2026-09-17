@@ -30,6 +30,7 @@ __copyright__ = '(C) 2026 by Jane Lund Andersen/VIA University College'
 
 __revision__ = '$Format:%H$'
 
+import dataclasses
 import os
 import requests as rq
 import inspect
@@ -42,10 +43,14 @@ from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterFile,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterFolderDestination
     )
+from pythermonet.input import load_settings
+from pythermonet.output import save_settings
 from ..utils import calculate_tc, fetch_api_data, get_representative_point, get_logo
 
 
@@ -54,6 +59,8 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
     #Handle input/output
     INPUT_AREA = 'INPUT_AREA'
     DEPTH = 'DEPTH'
+    SETTINGS_FILE = 'SETTINGS_FILE'
+    UPDATE_THERMAL_CONDUCTIVITY = 'UPDATE_THERMAL_CONDUCTIVITY'
 
     def initAlgorithm(self, config=None):
         
@@ -87,7 +94,40 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             "- It is defined from the ground surface with positive values downwards"
         )
         self.addParameter(param)
-        
+
+        # Optional: settings file to update with the resulting value
+        param = QgsProcessingParameterFile(
+                self.SETTINGS_FILE,
+                "Settings file to update (optional)",
+                extension="json",
+                optional=True
+            )
+        param.setHelp(
+            "Project settings file (.json) created/edited with the "
+            "'Dimensioning Settings' tool. When given, the ground thermal "
+            "conductivity computed at the AOI's center point (this tool's "
+            "primary result, not the spatial-sensitivity offset points) can "
+            "overwrite soil.thermal_conductivity in this file -- see "
+            "'Overwrite soil.thermal_conductivity' below. Leave empty to "
+            "just get the report, as before.\n"
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(
+                self.UPDATE_THERMAL_CONDUCTIVITY,
+                "Overwrite soil.thermal_conductivity in the settings file",
+                defaultValue=True
+            )
+        param.setHelp(
+            "Only used when a settings file is given above. When checked, "
+            "the computed ground thermal conductivity is written back into "
+            "the settings file's Soil block -- this overwrites the value on "
+            "disk, not just for this run. This is the deep/bulk value BHE "
+            "dimensioning uses; it does not touch the separate shallow "
+            "values HHE dimensioning reads.\n"
+        )
+        self.addParameter(param)
+
         # 3rd input (output folder)
         param = QgsProcessingParameterFolderDestination(
             'OUTPUT_FOLDER',
@@ -102,6 +142,10 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
         input_depth = self.parameterAsInt(parameters, self.DEPTH, context)
         output_folder = self.parameterAsString(parameters, 'OUTPUT_FOLDER', context)
+        settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
+        update_thermal_conductivity = self.parameterAsBoolean(
+            parameters, self.UPDATE_THERMAL_CONDUCTIVITY, context
+        )
 
         # Step 1: Calculate the center coordinates of the AOI input (EPSG:25832)
         feedback.pushInfo("Calculating input coordinates...")
@@ -316,7 +360,43 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
        	out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}_{input_depth}m.png")
        	fig.savefig(out_path, dpi=150, bbox_inches="tight")
        	feedback.pushInfo(f"Figure saved to: {out_path}")
-       
+
+        # Step 6: Optionally overwrite soil.thermal_conductivity in a
+        # settings file with the center-point result (tc_depthavg) -- not
+        # the spatial-sensitivity offset points, which are for reporting only.
+        if settings_path:
+            if not update_thermal_conductivity:
+                feedback.pushInfo(
+                    "Settings file given but 'Overwrite soil.thermal_conductivity' "
+                    "is unchecked -- leaving it untouched."
+                )
+            elif tc_depthavg is None:
+                raise QgsProcessingException(
+                    "Can't update the settings file: no ground thermal "
+                    "conductivity could be computed at the AOI's center point."
+                )
+            else:
+                feedback.pushInfo("Updating settings file...")
+                try:
+                    settings = load_settings(settings_path)
+                except (FileNotFoundError, ValueError) as exc:
+                    raise QgsProcessingException(str(exc))
+                if "soil" not in settings:
+                    raise QgsProcessingException(
+                        "Settings file has no 'soil' block to update."
+                    )
+                settings["soil"] = dataclasses.replace(
+                    settings["soil"], thermal_conductivity=tc_depthavg
+                )
+                try:
+                    save_settings(settings_path, settings)
+                except ValueError as exc:
+                    raise QgsProcessingException(str(exc))
+                feedback.pushInfo(
+                    f"soil.thermal_conductivity updated to {tc_depthavg:.2f} W/m/K "
+                    f"in {settings_path}"
+                )
+
         return {}
 
 
@@ -543,6 +623,10 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             "<p> 2. Creates a report of the ground thermal conductivity based on"
             " the local geology and water content, and provides spatial and depth sensitivity "
             "estimates. The report is saved to the selected folder (png). "
+            "<p> 3. Optionally overwrites soil.thermal_conductivity in a project's "
+            "settings file (created/edited with the 'Dimensioning Settings' tool) "
+            "with the center-point result -- the deep/bulk value BHE dimensioning "
+            "uses. Leave the settings file empty to just get the report, as before. <p>"
             "<p> Data on ground water table and local geology is"
             " retrieved by an API call to the tool developed by GEUS (REFERENCE). <p> "
                )
