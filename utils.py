@@ -186,6 +186,43 @@ def get_logo(filename: str) -> str:
     return get_resource(f"logos/{filename}")
 
 
+def read_datafordeler_api_key() -> str:
+    """Read the Datafordeler API key from the plugin's ``.env`` file.
+
+    Parses the minimal ``KEY=value`` format directly instead of depending on
+    ``python-dotenv``, which is not guaranteed to be present in QGIS's
+    bundled Python environment.
+
+    Returns
+    -------
+    str
+        The value of ``DATAFORDELER_API_KEY``.
+
+    Raises
+    ------
+    ValueError
+        If ``.env`` is missing, or has no non-empty ``DATAFORDELER_API_KEY``
+        entry.
+    """
+    env_path = PLUGIN_ROOT / ".env"
+    if not env_path.exists():
+        raise ValueError(
+            f"Missing {env_path}. Copy .env-template to .env and set DATAFORDELER_API_KEY."
+        )
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == "DATAFORDELER_API_KEY":
+            api_key = value.strip().strip('"').strip("'")
+            if api_key:
+                return api_key
+
+    raise ValueError(f"DATAFORDELER_API_KEY not set in {env_path}.")
+
+
 def default_save_directory() -> str:
     """The current QGIS project's folder, for seeding a file/folder-save dialog.
 

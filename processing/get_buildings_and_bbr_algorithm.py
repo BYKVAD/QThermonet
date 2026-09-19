@@ -57,7 +57,6 @@ from qgis.core import (
     QgsProcessingParameterDefinition,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterFileDestination,
-    QgsProcessingParameterString,
     QgsProject,
     QgsRendererCategory,
     QgsSingleSymbolRenderer,
@@ -72,8 +71,6 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
     #Handle input/output
     INPUT_AREA = 'INPUT_AREA'
-    BBR_UID = 'BBR_UID'
-    BBR_PW = 'BBR_PW'
     OUTPUT_BUILD = 'OUTPUT_BUILD'
     OUTPUT_ROADS = 'OUTPUT_ROADS'
 
@@ -90,27 +87,6 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             "- Be a polygon layer (shape or geojson format).\n"
             "- Contain a single polygon outlining the Area-Of-Interest.\n"
             "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
-        )
-        self.addParameter(param)
-        #2nd input
-        param = QgsProcessingParameterString(
-                self.BBR_UID,
-                self.tr("Username for Datafordeler:"),
-                defaultValue='DUMMY'
-            )
-        param.setHelp(
-            "Create your username at https://datafordeler.dk:\n"
-            )
-        self.addParameter(param)
-        
-        #3rd input
-        param = QgsProcessingParameterString(
-                self.BBR_PW,
-                self.tr("Password for Datafordeler:"),
-                defaultValue='DUMMY'
-            )
-        param.setHelp(
-            "Create your password at https://datafordeler.dk:\n"
         )
         self.addParameter(param)
         #1st output
@@ -148,11 +124,14 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
     def processAlgorithm(self, parameters, context, feedback):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
-        BBR_UID = self.parameterAsString(parameters, self.BBR_UID, context)
-        BBR_PW = self.parameterAsString(parameters, self.BBR_PW, context)
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_BUILD, context)
         output_roads_path = self.parameterAsFileOutput(parameters, self.OUTPUT_ROADS, context)
         open_output = self.parameterAsBoolean(parameters, "OPEN_OUTPUT", context)
+
+        try:
+            api_key = utils.read_datafordeler_api_key()
+        except ValueError as e:
+            raise QgsProcessingException(str(e))
 
         # Check input AOI layer
         feedback.pushInfo("Checking input layer ...")
@@ -176,10 +155,11 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException("The input feature geometry has errors!")
 
         # Common WFS settings
-        wfs_base_url = "https://wfs.datafordeler.dk/GeoDanmarkVektor/GeoDanmark60_NOHIST_GML3/1.0.0/WFS"
+        wfs_base_url = "https://wfs.datafordeler.dk/GEODKV/GEODKV_WFS/1.0.0/WFS"
         service = "WFS"
         request = "GetFeature"
         version = "2.0.0"
+        output_format = "application/json"
         startindex = 0
         count = 30000
         epsg = 25832  #crs code
@@ -200,12 +180,12 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             polygon_wkt_wfs = self.get_polygon_geometry(input_area_layer, target_crs_wfs)
             polygon_wkt_encoded = quote(polygon_wkt_wfs)
 
-            layer_name = "gdk60:Bygning"
+            layer_name = "geodkv_v001:bygning_current"
             complete_url = (
-                f"{wfs_base_url}?username={BBR_UID}&password={BBR_PW}"
+                f"{wfs_base_url}?apikey={api_key}"
                 f"&SERVICE={service}&REQUEST={request}&VERSION={version}&TYPENAMES={layer_name}"
-                f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}"
-                f"&CQL_FILTER=WITHIN(gdk60:geometri,{polygon_wkt_encoded})"
+                f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}&OUTPUTFORMAT={output_format}"
+                f"&CQL_FILTER=WITHIN(geometri,{polygon_wkt_encoded})"
             )
 
             response = rq.get(complete_url, timeout=(20, 120))           
@@ -221,7 +201,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             if not buildings_layer.isValid():
                 raise QgsProcessingException(
                     f"The buildings layer could not be loaded from WFS. "
-                    f"Check your username, password, and AOI geometry."
+                    f"Check your DATAFORDELER_API_KEY and AOI geometry."
                 )
 
             feedback.pushInfo("Buildings vector layer loaded successfully!")
@@ -250,13 +230,15 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         except QgsProcessingException:
             raise
         except Exception as e:
-            raise QgsProcessingException(f"Error while retrieving buildings: {e}")
+            raise QgsProcessingException(
+                f"Error while retrieving buildings: {str(e).replace(api_key, '<REDACTED>')}"
+            )
 
         # --------------------------------------------------
         # STEP 2: BBR
         # --------------------------------------------------
         feedback.pushInfo("Retrieving BBR information...")
-        BuildYear_values, BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values = self.BBR(transformed_layer, BBR_UID, BBR_PW, feedback)
+        bbr_attributes_by_uuid = self._fetch_bbr_attributes(transformed_layer, api_key, feedback)
 
         feedback.pushInfo("Adding BBR information to output file ...")
 
@@ -273,12 +255,13 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         transformed_provider.addAttributes(new_fields)
         transformed_layer.updateFields()
 
-        for i, feature in enumerate(transformed_layer.getFeatures()):
-            feature.setAttribute("BuildYear", BuildYear_values[i])
-            feature.setAttribute("BuildCode", BuildCode_values[i])
-            feature.setAttribute("BBRArea", BBRArea_values[i])
-            feature.setAttribute("BuildHeat", BuildHeatInstallation_values[i])
-            feature.setAttribute("FuelType", FuelType_values[i])
+        for feature in transformed_layer.getFeatures():
+            attrs = bbr_attributes_by_uuid.get(feature["BBRUUID"], {})
+            feature.setAttribute("BuildYear", attrs.get("BuildYear", 0))
+            feature.setAttribute("BuildCode", attrs.get("BuildCode", 0))
+            feature.setAttribute("BBRArea", attrs.get("BBRArea", 0))
+            feature.setAttribute("BuildHeat", attrs.get("BuildHeat", 0))
+            feature.setAttribute("FuelType", attrs.get("FuelType", 0))
             transformed_layer.updateFeature(feature)
 
         transformed_layer.commitChanges()
@@ -348,12 +331,12 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 polygon_wkt_wfs = self.get_polygon_geometry(input_area_layer, target_crs_wfs)
                 polygon_wkt_encoded = quote(polygon_wkt_wfs)
 
-                road_layer_name = "gdk60:Vejmidte"
+                road_layer_name = "geodkv_v001:vejmidte_current"
                 roads_url = (
-                    f"{wfs_base_url}?username={BBR_UID}&password={BBR_PW}"
+                    f"{wfs_base_url}?apikey={api_key}"
                     f"&SERVICE={service}&REQUEST={request}&VERSION={version}&TYPENAMES={road_layer_name}"
-                    f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}"
-                    f"&CQL_FILTER=INTERSECTS(gdk60:geometri,{polygon_wkt_encoded})"
+                    f"&STARTINDEX={startindex}&COUNT={count}&SRSNAME={srsname}&OUTPUTFORMAT={output_format}"
+                    f"&CQL_FILTER=INTERSECTS(geometri,{polygon_wkt_encoded})"
                 )
 
                 response = rq.get(roads_url, timeout=(20, 120))           
@@ -474,7 +457,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                                 feedback.pushInfo(f"Failed to export the roads layer. Error: {error}")
 
             except Exception as e:
-                feedback.pushInfo(f"Road processing failed: {e}")
+                feedback.pushInfo(f"Road processing failed: {str(e).replace(api_key, '<REDACTED>')}")
                 feedback.pushInfo("Building output is still completed successfully.")
 
             # Open road layer only if it was actually created
@@ -541,77 +524,102 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                 feature.setAttribute("Thermonet", thermonet_value)
                 layer.updateFeature(feature)
 
-    def BBR(self, layer, BBR_UID, BBR_PW, feedback):
-        BuildYear_values = []
-        BuildCode_values = []
-        BBRArea_values = []
-        BuildHeatInstallation_values = []
-        FuelType_values = []
+    def _fetch_bbr_attributes(self, layer, api_key, feedback):
+        """Fetch BBR building attributes for every feature's BBRUUID, batched.
 
-        bbr_url = 'https://services.datafordeler.dk/BBR/BBRPublic/1/rest/bygning'
+        Queries the BBR entity-based WFS (``bbr_v001:bygning_current``) via
+        POST requests, chunking BBRUUIDs into batches of at most
+        ``max_batch_size``. POST (rather than GET) is required above
+        roughly 150 IDs per request: this WFS's server caps HTTP header
+        size at ~8KB, and GET puts the CQL_FILTER in the URL/request line,
+        while POST moves it into the request body instead.
+
+        Parameters
+        ----------
+        layer : QgsVectorLayer
+            The buildings layer; each feature must have a 'BBRUUID' field.
+        api_key : str
+            Datafordeler API key.
+        feedback : QgsProcessingFeedback
+            Used to report per-batch progress and support cancellation.
+
+        Returns
+        -------
+        dict[str, dict[str, int]]
+            Maps each BBRUUID to its BuildYear/BuildCode/BBRArea/BuildHeat/
+            FuelType values. A BBRUUID with no matching BBR record is
+            simply absent from the returned mapping.
+
+        Raises
+        ------
+        QgsProcessingException
+            If a batch request times out or otherwise fails.
+        """
+        bbr_url = "https://wfs.datafordeler.dk/BBR/BBR_WFS/1.0.0/WFS"
+        bbr_typename = "bbr_v001:bygning_current"
+        max_batch_size = 200
+
         if not any(layer.getFeatures()):
             raise QgsProcessingException("No buildings found within the AOI!")
-        total_features = max(layer.featureCount(), 1)
 
-        for current, feature in enumerate(layer.getFeatures()):
+        uuids = [feature["BBRUUID"] for feature in layer.getFeatures() if feature["BBRUUID"]]
+        unique_uuids = list(dict.fromkeys(uuids))
+        if not unique_uuids:
+            return {}
+
+        batches = [
+            unique_uuids[i:i + max_batch_size]
+            for i in range(0, len(unique_uuids), max_batch_size)
+        ]
+
+        attributes_by_uuid = {}
+        for batch_index, batch_uuids in enumerate(batches):
             if feedback.isCanceled():
                 break
 
-            # Get BBRUUID to pass
-            if feature["BBRUUID"]:
-                pass_ids = feature["BBRUUID"]
+            id_list = ",".join(f"'{uuid}'" for uuid in batch_uuids)
+            body = {
+                "service": "WFS",
+                "request": "GetFeature",
+                "typeName": bbr_typename,
+                "outputFormat": "application/json",
+                "CQL_FILTER": f"id_lokalId IN ({id_list})",
+            }
 
-                params = {
-                    'format': 'json',
-                    'id': pass_ids,
-                    'username': BBR_UID,
-                    'password': BBR_PW
+            try:
+                response = rq.post(f"{bbr_url}?apikey={api_key}", data=body, timeout=(20, 120))
+                response.raise_for_status()
+                data = response.json()
+            except rq.exceptions.Timeout:
+                raise QgsProcessingException(
+                    f"BBR request timed out for batch {batch_index + 1}/{len(batches)}"
+                )
+            except rq.exceptions.RequestException as e:
+                raise QgsProcessingException(
+                    f"BBR request failed for batch {batch_index + 1}/{len(batches)}: "
+                    f"{str(e).replace(api_key, '<REDACTED>')}"
+                )
+
+            for wfs_feature in data.get("features", []):
+                properties = wfs_feature.get("properties", {})
+                uuid = properties.get("id_lokalId")
+                if not uuid:
+                    continue
+                attributes_by_uuid[uuid] = {
+                    "BuildYear": properties.get("byg026Opførelsesår") or 0,
+                    "BuildCode": properties.get("byg021BygningensAnvendelse") or 0,
+                    "BBRArea": properties.get("byg038SamletBygningsareal") or 0,
+                    "BuildHeat": properties.get("byg056Varmeinstallation") or 0,
+                    "FuelType": properties.get("byg057Opvarmningsmiddel") or 0,
                 }
 
-                try:
-                    response = rq.get(url=bbr_url, params=params, timeout=(20, 120))
-                    response.raise_for_status()
-                    data = response.json()
-                except rq.exceptions.Timeout:
-                    raise QgsProcessingException(f"BBR request timed out for building {current + 1}")
-                except rq.exceptions.HTTPError as e:
-                    raise QgsProcessingException(f"BBR returned an error for building {current + 1}: {e}")
+            feedback.pushInfo(
+                f"Fetched BBR data for batch {batch_index + 1}/{len(batches)} "
+                f"({len(batch_uuids)} buildings)"
+            )
+            feedback.setProgress(int(100 * (batch_index + 1) / len(batches)))
 
-                # saveguard for empty data
-                BuildYear_value = 0
-                BuildCode_value = 0
-                BuildArea_value = 0
-                BuildHeatInstallation_value = 0
-                FuelType_value = 0
-                for x in data:
-                    BuildYear_value = x.get('byg026Opførelsesår') or 0
-                    BuildCode_value = x.get('byg021BygningensAnvendelse') or 0
-                    BuildArea_value = x.get('byg038SamletBygningsareal') or 0
-                    BuildHeatInstallation_value = x.get('byg056Varmeinstallation') or 0
-                    FuelType_value = x.get('byg057Opvarmningsmiddel') or 0
-                    feedback.pushInfo(
-                        f"Building {current + 1}/{total_features} - "
-                        f"Year: {BuildYear_value}, Code: {BuildCode_value}, "
-                        f"Area: {BuildArea_value}, Heat: {BuildHeatInstallation_value}, "
-                        f"Fuel: {FuelType_value}"
-                    )
-
-                BuildYear_values.append(BuildYear_value)
-                BuildCode_values.append(BuildCode_value)
-                BBRArea_values.append(BuildArea_value)
-                BuildHeatInstallation_values.append(BuildHeatInstallation_value)
-                FuelType_values.append(FuelType_value)
-
-            else:
-                BuildYear_values.append(0)
-                BuildCode_values.append(0)
-                BBRArea_values.append(0)
-                BuildHeatInstallation_values.append(0)
-                FuelType_values.append(0)
-
-            feedback.setProgress(int(100 * current / total_features))
-
-        return BuildYear_values, BuildCode_values, BBRArea_values, BuildHeatInstallation_values, FuelType_values
+        return attributes_by_uuid
 
     def name(self):
         """
@@ -669,10 +677,10 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             "the building has 'BBRUUID' = NULL, 'BBRArea' = 0, or 'BuildCode' > 200. <p>"
             "<p> 4. Stores the buildings in a new file.<p>"
             "<p> 5. Optionally tries to retrieve roads and export them as a separate file.<p>"
-            "<p> <b>Please note:</b> In order to access BBR information you need to create a user "
-            "at https://datafordeler.dk/ <br>"
-            "Input your own username and password, but please note that the connection "
-            "is not encrypted, so choose a non-sensitive password. <p>"
+            "<p> <b>Please note:</b> This tool requires a Datafordeler API key, set as "
+            "DATAFORDELER_API_KEY in a .env file next to the plugin (copy .env-template to "
+            ".env and fill it in). Create an IT-system with API-key authentication via "
+            "Datafordeler's Administration portal at https://datafordeler.dk/ to obtain one. <p>"
         )
 
     def createInstance(self):
