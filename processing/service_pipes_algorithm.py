@@ -105,7 +105,8 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFileDestination(
                 self.OUTPUT_LAYER,
                 "Output Service Pipes",
-                fileFilter="GeoJSON (*.geojson)"
+                fileFilter="GeoJSON (*.geojson)",
+                defaultValue=os.path.join(utils.default_save_directory(), "service_pipes.geojson")
             )
         param.setHelp(
             "The output layer will contain the shortest distance service pipes "

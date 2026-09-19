@@ -184,3 +184,52 @@ def get_logo(filename: str) -> str:
         Absolute filesystem path to the icon.
     """
     return get_resource(f"logos/{filename}")
+
+
+def default_save_directory() -> str:
+    """The current QGIS project's folder, for seeding a file/folder-save dialog.
+
+    Used so a new output file (or a new settings file) defaults to sitting
+    next to the project it belongs to, rather than wherever Qt's own
+    fallback -- the last folder used in any dialog this session, or the OS
+    default -- happens to be. Reachable from any processing algorithm or
+    dialog in this plugin, per this module's purpose.
+
+    Returns
+    -------
+    str
+        The project file's parent directory, or ``""`` if the project
+        hasn't been saved yet. ``os.path.join("", filename)`` is just
+        ``filename``, so callers can use this unconditionally as the
+        directory component of a suggested save path.
+    """
+    from qgis.core import QgsProject
+
+    project_path = QgsProject.instance().fileName()
+    return str(Path(project_path).parent) if project_path else ""
+
+
+def warn_if_project_unsaved(parent) -> None:
+    """Nudge the user if the project has no folder to default a file dialog to.
+
+    Not fatal -- a file dialog opened right after this still works either
+    way, just without a sensible starting folder (Qt falls back to the
+    last-used directory, or the OS default) instead of the project's own.
+
+    Parameters
+    ----------
+    parent : QWidget
+        Parent widget for the message box (typically the dialog about to
+        open a file-save dialog).
+    """
+    if default_save_directory():
+        return
+
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    QMessageBox.information(
+        parent,
+        "Project not saved",
+        "This QGIS project hasn't been saved yet, so the file dialog won't "
+        "default to the project's folder. Consider saving the project first.",
+    )

@@ -38,14 +38,15 @@ from qgis import processing
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (
-                       QgsCoordinateTransform, 
+                       QgsCoordinateTransform,
                        QgsCoordinateReferenceSystem,
                        QgsExpression,
                        QgsExpressionContext,
                        QgsExpressionContextUtils,
                        QgsField,
+                       QgsGeometry,
                        QgsLineSymbol,
-                       QgsProcessing, 
+                       QgsProcessing,
                        QgsProcessingAlgorithm,
                        QgsProcessingException,
                        QgsProcessingParameterFeatureSource,
@@ -54,7 +55,8 @@ from qgis.core import (
                        QgsProject,
                        QgsSingleSymbolRenderer,
                        QgsVectorFileWriter,
-                       QgsVectorLayer
+                       QgsVectorLayer,
+                       QgsWkbTypes
                        )
 
 class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
@@ -86,14 +88,16 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         #2nd input
         param = QgsProcessingParameterFeatureSource(
                 self.SOURCE_LAYER,
-                "Select the thermonet source area Layer",
-                [QgsProcessing.TypeVectorPolygon],
+                "Select the source placement layer",
+                [QgsProcessing.TypeVectorPoint, QgsProcessing.TypeVectorLine],
             )
         param.setHelp(
-            "The input source area layer must:\n"
-            "- consist of a single polygon in a shapefile/geojson format"
+            "The output of the 'Source Placement' tool:\n"
+            "- a BHE borefield point layer, or an HHE trench line layer\n"
+            "- must have an 'is_connection_node' attribute flagging the "
+            "feature where the field connects to the distribution network "
+            "(for a line layer, 'connection_node_end' names which end)\n"
             "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
-            "The source area layer outlines the location of the BHE/HHE field"
         )
 
         self.addParameter(param)
@@ -103,7 +107,8 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 self.tr('Output GeoJSON'),
-                fileFilter="GeoJSON (*.geojson)"  # Filter for file type
+                fileFilter="GeoJSON (*.geojson)",  # Filter for file type
+                defaultValue=os.path.join(utils.default_save_directory(), "pipe_hierarchy.geojson")
             )
         )
 
@@ -218,7 +223,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         
         
         # # Step 4: Find main pipe and recursively assign levels
-        root_pipe_id = self.find_closest_pipe(split_pipes_layer, source_layer_proj, context)
+        root_pipe_id = self.find_closest_pipe(split_pipes_layer, source_layer_proj, context, feedback)
 
         if root_pipe_id is not None:
             feedback.pushInfo(f"Root pipe assigned with level 0 (Feature ID: {root_pipe_id})")
@@ -372,33 +377,35 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             self.OUTPUT: output_path
             }
     
-    def find_closest_pipe(self, split_pipes_layer, source_layer_proj, context):
-        """Finds the closest pipe segment to the input polygon and assigns level 0."""
-        
+    #: Warn (not fail) if the connection node ends up farther than this from
+    #: the nearest pipe -- suggests the user forgot to snap it to the
+    #: network when placing it in Source Placement.
+    CONNECTION_NODE_SNAP_TOLERANCE = 0.5  # m
+
+    def find_closest_pipe(self, split_pipes_layer, source_layer_proj, context, feedback):
+        """Finds the pipe segment closest to the source layer's connection node, for level 0."""
+
         # Get CRS of split_pipes_layer (assumes all features in the same CRS)
         layer_crs = split_pipes_layer.crs()
         source_layer_crs = source_layer_proj.crs()
-        
+
         # Create a coordinate transform if needed
         if layer_crs != source_layer_crs:
             transform = QgsCoordinateTransform(source_layer_crs, layer_crs, QgsProject.instance())
         else:
             transform = None
-    
-        # Get the input polygon geometry (assuming a single feature)
-        source_feature = next(source_layer_proj.getFeatures(), None)
-        if not source_feature:
-            return None  # No source polygon found
-        
-        source_geom = source_feature.geometry()
-        
+
+        source_geom = self.get_connection_node_geometry(source_layer_proj)
+        if source_geom is None:
+            return None  # No connection-node feature found
+
         # Transform input geometry if needed
         if transform:
             source_geom.transform(transform)
-    
+
         min_distance = float("inf")
         closest_feature_id = None
-    
+
         # Find the closest pipe segment
         for feature in split_pipes_layer.getFeatures():
             pipe_geom = feature.geometry()
@@ -406,11 +413,61 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             if distance < min_distance:
                 min_distance = distance
                 closest_feature_id = feature.id()
-    
+
         # Update the level attribute of the closest segment
         if closest_feature_id is not None:
+            if min_distance > self.CONNECTION_NODE_SNAP_TOLERANCE:
+                feedback.reportError(
+                    f"The connection node is {min_distance:.2f} m from the nearest pipe "
+                    f"(tolerance: {self.CONNECTION_NODE_SNAP_TOLERANCE} m) -- did you forget "
+                    "to snap it to the pipe network when placing it in Source Placement?",
+                    fatalError=False,
+                )
             return closest_feature_id  # Return the ID of the root pipe
-    
+
+        return None
+
+    def get_connection_node_geometry(self, source_layer):
+        """Extract the connection-node point from a Source Placement output layer.
+
+        Handles both output shapes Source Placement can produce: a BHE
+        borefield point layer, where the flagged feature's own geometry is
+        the connection node, and an HHE trench line layer, where the
+        flagged feature's `connection_node_end` attribute names which end
+        of that line is the connection node (a line's vertex order alone
+        isn't reliable -- see
+        `claude/handoffs/2026-09-17-hhe-source-placement-backlog.md`).
+
+        Parameters
+        ----------
+        source_layer : QgsVectorLayer
+            The selected source placement layer.
+
+        Returns
+        -------
+        QgsGeometry | None
+            The connection node as a point geometry, or `None` if the layer
+            has no `is_connection_node` field or no feature has it set.
+
+        """
+        field_names = [field.name() for field in source_layer.fields()]
+        if "is_connection_node" not in field_names:
+            return None
+        has_end_field = "connection_node_end" in field_names
+
+        for feature in source_layer.getFeatures():
+            if not feature["is_connection_node"]:
+                continue
+            geometry = feature.geometry()
+            if geometry.type() == QgsWkbTypes.PointGeometry:
+                return geometry
+            if geometry.type() == QgsWkbTypes.LineGeometry:
+                polyline = geometry.asPolyline()
+                end = feature["connection_node_end"] if has_end_field else "start"
+                point = polyline[0] if end == "start" else polyline[-1]
+                return QgsGeometry.fromPointXY(point)
+            return None
+
         return None
     
     def assign_levels(self, split_pipes_layer, root_pipe_id, feedback):
@@ -560,13 +617,16 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         return ("<p><b> This tool: </b></p>"
                 "<p> - constructs a pipe network hierarchy for a thermonet "
                 "based on an input pipe layer with the geometry of the main pipes, "
-                "and the location of the thermonet source area for the HHE/BHE field.</p>"
+                "and the connection node of the HHE/BHE field's source placement layer.</p>"
                 "<p>Note that the pipe input layer needs to be in a tree structure"
                 " (i.e. no circular loops, and all pipes touching (or within 1 "
                 "m of) at least one other pipe).</p>"
-                "<p>The source area file is a polygon that is located closest to "
-                "the main pipe of the network, the size of the source area is "
-                "not important.</p>"
+                "<p>The source layer is the output of the 'Source Placement' tool -- a "
+                "BHE point layer or an HHE trench line layer -- with the feature flagged "
+                "'is_connection_node' marking where the field connects to the network. "
+                "A warning is shown if that node is more than "
+                f"{PipeHierarchyAlgorithm.CONNECTION_NODE_SNAP_TOLERANCE} m from the "
+                "nearest pipe, suggesting it wasn't snapped to the network.</p>"
         )
     
     def createInstance(self):

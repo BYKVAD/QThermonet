@@ -99,16 +99,18 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 self.tr('Output GeoJSON'),
-                fileFilter="GeoJSON (*.geojson)"  # Filter for file type
+                fileFilter="GeoJSON (*.geojson)",  # Filter for file type
+                defaultValue=os.path.join(utils.default_save_directory(), "pipe_topology.geojson")
             )
         )
-        
+
         #output dat-format
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 "DAT_OUTPUT",
                 self.tr("Output DAT file"),
-                fileFilter="DAT files (*.dat)"
+                fileFilter="DAT files (*.dat)",
+                defaultValue=os.path.join(utils.default_save_directory(), "pipe_topology.dat")
             )
         )
 

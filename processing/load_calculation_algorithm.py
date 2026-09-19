@@ -90,7 +90,8 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 self.tr('Output GeoJSON'),
-                fileFilter="GeoJSON (*.geojson)"
+                fileFilter="GeoJSON (*.geojson)",
+                defaultValue=os.path.join(utils.default_save_directory(), "heat_loads.geojson")
             )
         )
 
@@ -108,7 +109,8 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 "DAT_OUTPUT",
                 self.tr("Output DAT file"),
-                fileFilter="DAT files (*.dat)"
+                fileFilter="DAT files (*.dat)",
+                defaultValue=os.path.join(utils.default_save_directory(), "heat_loads.dat")
             )
         )
 

@@ -4,11 +4,17 @@
 Lets a user create or edit a project's ``settings.json`` without leaving
 QGIS. Rendering is schema-agnostic (one text box per field found in the
 loaded JSON) and role-filtered (only roles from :data:`ROLES_BHE` /
-:data:`ROLES_HHE` are shown, in that order). Save writes the edited JSON to
-a temp file, validates it with ``pythermonet.input.load_settings`` (the
-real function the full-dimensioning algorithm will call), and only then
-replaces the target file -- so a failed edit never corrupts the
-last-known-good settings file.
+:data:`ROLES_HHE` are shown, in that order). Save writes the edited JSON via
+:func:`~QThermonet.source_placement_dialog.write_settings_json` -- the one
+place in QThermonet that actually writes a settings file to disk, shared
+with Source Placement's HHE export and Full Dimensioning's computed-length
+write-back. It validates with ``pythermonet.input.load_settings`` (the real
+function the full-dimensioning algorithm will call) before ever replacing
+the target file -- so a failed edit never corrupts the last-known-good
+settings file. After a successful save,
+:func:`~QThermonet.source_placement_dialog.refresh_hhe_trench_layer` is
+called too, refreshing an already-exported HHE trench layer if one is
+loaded and affected.
 
 See ``claude/handoff/handoff-settings-window-design.md`` for the full
 confirmed design this implements.
@@ -24,8 +30,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from pythermonet.input import load_settings
 from pythermonet.resources import SETTINGS_TEMPLATE_BHE_PATH, SETTINGS_TEMPLATE_HHE_PATH
+
+from . import utils
+from .source_placement_dialog import refresh_hhe_trench_layer, write_settings_json
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from qgis.PyQt.QtWidgets import (
@@ -77,7 +85,7 @@ ROLES_HHE: tuple[str, ...] = (
     "brine_temperature_limits",
     "pipe_material_hhe",
     "pipe_segment_hhe",
-    "pipe_infrastructure_hhe",
+    "hhe_field_parameters",
 )
 
 # Roles that exist only in one template -- used to detect a loaded file's
@@ -86,7 +94,7 @@ _BHE_ONLY_ROLES = frozenset(
     {"grout", "pipe_material_bhe", "borehole", "pipe_segment_bhe", "vhe_field_parameters"}
 )
 _HHE_ONLY_ROLES = frozenset(
-    {"pipe_material_hhe", "pipe_segment_hhe", "pipe_infrastructure_hhe"}
+    {"pipe_material_hhe", "pipe_segment_hhe", "hhe_field_parameters"}
 )
 
 # Hand-maintained, QThermonet-local display overrides for the generic
@@ -453,8 +461,12 @@ class _TemplateChoiceDialog(QDialog):
     def _on_browse(self) -> None:
         mode = "HHE" if self._hhe_radio.isChecked() else "BHE"
         default_name = f"settings_{mode.lower()}.json"
+        utils.warn_if_project_unsaved(self)
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save New Settings File", default_name, "Settings JSON (*.json)"
+            self,
+            "Save New Settings File",
+            os.path.join(utils.default_save_directory(), default_name),
+            "Settings JSON (*.json)",
         )
         if not path:
             return
@@ -800,16 +812,12 @@ class SettingsEditorDialog(QDialog):
             )
             return
 
-        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_bytes((json.dumps(updated_raw, indent=2) + "\n").encode("utf-8"))
         try:
-            load_settings(temp_path)
+            write_settings_json(self.path, updated_raw)
         except ValueError as exc:
-            os.remove(temp_path)
             self._handle_validation_failure(str(exc))
             return
 
-        os.replace(temp_path, self.path)
         self._raw = updated_raw
         # Rebuild rather than just clear-highlight: each row's
         # `original_value` must re-baseline to what was just saved, or the
@@ -818,6 +826,12 @@ class SettingsEditorDialog(QDialog):
         self._rebuild_sections()
         self._error_panel.setVisible(False)
         self._set_status("Saved.")
+
+        # One of the two known trigger points for refreshing an already-
+        # exported HHE trench layer -- see refresh_hhe_trench_layer()'s own
+        # docstring. A no-op unless this file has a qthermonet_hhe_settings
+        # section naming a layer currently loaded in the project.
+        refresh_hhe_trench_layer(str(self.path))
 
     def _apply_edits(self, updated_raw: dict) -> tuple[str, str, str] | None:
         """Write every field row's current text back into `updated_raw`.

@@ -129,7 +129,8 @@ class AggregatedLoadAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 "Output DAT File",
-                "DAT files (*.dat)"
+                "DAT files (*.dat)",
+                defaultValue=os.path.join(utils.default_save_directory(), "aggregated_load.dat")
             )
         )
         

@@ -47,10 +47,11 @@ from qgis.core import (QgsProcessingAlgorithm,
 
 from .. import utils
 from ..settings_editor_dialog import ROLES_BHE, ROLES_HHE, detect_mode
+from ..source_placement_dialog import refresh_hhe_trench_layer, update_settings_fields
 
 from pythermonet.components import (
     build_distribution_network,
-    build_pipe_infrastructure,
+    build_hhe_field,
     build_vhe_field,
     ground_loads_from_heat_pumps,
     localize_borefield_coordinates,
@@ -210,7 +211,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 "Output File",
-                "CSV files (*.csv)"
+                "CSV files (*.csv)",
+                defaultValue=os.path.join(utils.default_save_directory(), "full_dimensioning_output.csv")
             )
         )
 
@@ -333,11 +335,14 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo("Performing HHE sizing...")
             pipe_material_hhe = settings["pipe_material_hhe"]
             pipe_segment_hhe = settings["pipe_segment_hhe"]
-            pipe_infrastructure_parameters_hhe = settings["pipe_infrastructure_hhe"]
+            # `length_element` on this role is a display-only placeholder --
+            # pythermonet's own HHEFieldParameters docstring says it is always
+            # overwritten by the sizing solver, never a real input.
+            hhe_field_parameters = settings["hhe_field_parameters"]
 
-            pipe_infrastructure_hhe = build_pipe_infrastructure(
+            pipe_infrastructure_hhe = build_hhe_field(
                 segment_parameters=pipe_segment_hhe,
-                infrastructure_parameters=pipe_infrastructure_parameters_hhe,
+                field_parameters=hhe_field_parameters,
                 pipe_material=pipe_material_hhe,
             )
             hhe_field = HHEGroundField(
@@ -357,6 +362,35 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 brine_temperature_limits=brine_temperature_limits,
             )
             print_hhe_results(result, pipe_infrastructure_hhe)
+
+            # Write the just-computed length back into the settings file's
+            # hhe_field_parameters.length_element -- unlike BHE (no length
+            # field exists in vhe_field_parameters at all), this field
+            # already exists and is already writable, so no pythermonet
+            # schema change is needed here (see
+            # claude/handoffs/2026-09-17-settings-file-results-writeback.md
+            # for the full BHE/HHE asymmetry). Non-fatal: the dimensioning
+            # itself already succeeded and was reported above, so a failure
+            # to persist the length shouldn't fail the whole run.
+            try:
+                update_settings_fields(
+                    settings_path,
+                    {"hhe_field_parameters": {"length_element": result.sizing.length_element}},
+                )
+            except ValueError as exc:
+                feedback.reportError(
+                    f"Computed HHE length ({result.sizing.length_element:.2f} m) was not "
+                    f"written back to the settings file: {exc}"
+                )
+
+            # One of the two known trigger points for refreshing an already-
+            # exported HHE trench layer -- see refresh_hhe_trench_layer()'s
+            # own docstring. A no-op unless the settings file has a
+            # qthermonet_hhe_settings section naming a layer currently
+            # loaded in the project. Runs after the write-back above so the
+            # refreshed trenches reflect the newly-computed length, not the
+            # placement tool's earlier guess.
+            refresh_hhe_trench_layer(settings_path)
 
         # # Write to output file
         # feedback.pushInfo("Writing output...")

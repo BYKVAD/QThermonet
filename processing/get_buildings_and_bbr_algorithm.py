@@ -117,7 +117,8 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFileDestination(
                 self.OUTPUT_BUILD,
                 self.tr('Output file for buildings'),
-                fileFilter="GeoJSON (*.geojson)"  # Filter for geojson files
+                fileFilter="GeoJSON (*.geojson)",  # Filter for geojson files
+                defaultValue=os.path.join(utils.default_save_directory(), "buildings.geojson")
             )
         param.setHelp(
             "Destination for output file containing buildings with BBR information.\n"
@@ -127,7 +128,8 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         param_roads = QgsProcessingParameterFileDestination(
             self.OUTPUT_ROADS,
             self.tr('Output file for roads'),
-            fileFilter="GeoJSON (*.geojson)"
+            fileFilter="GeoJSON (*.geojson)",
+            defaultValue=os.path.join(utils.default_save_directory(), "roads.geojson")
         )
         param_roads.setFlags(param_roads.flags() | QgsProcessingParameterDefinition.FlagOptional)
         param_roads.setHelp(

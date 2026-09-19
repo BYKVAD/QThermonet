@@ -51,7 +51,7 @@ from qgis.core import (
     )
 from pythermonet.input import load_settings
 from pythermonet.output import save_settings
-from ..utils import calculate_tc, fetch_api_data, get_representative_point, get_logo
+from ..utils import calculate_tc, default_save_directory, fetch_api_data, get_representative_point, get_logo
 
 
 class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
@@ -131,7 +131,8 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         # 3rd input (output folder)
         param = QgsProcessingParameterFolderDestination(
             'OUTPUT_FOLDER',
-            'Output folder'
+            'Output folder',
+            defaultValue=default_save_directory()
         )
         param.setHelp('Folder where the output PNG figures will be saved.')
         self.addParameter(param)
