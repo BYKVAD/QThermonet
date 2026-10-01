@@ -34,7 +34,10 @@ def fetch_api_data(X, Y):
     params   = {"x": X, "y": Y}
 
     try:
-        response = rq.get(base_url, params=params, timeout=10)
+        # (connect, read) seconds -- same as Get Buildings. Get Ground
+        # Conductivity calls this ~10 times per run, so one slow reply under
+        # the old flat 10 s failed the whole run (seen 2026-10-01).
+        response = rq.get(base_url, params=params, timeout=(20, 120))
     except rq.exceptions.ConnectionError:
         raise ValueError("Could not connect to the GEUS API. Check your internet connection.")
     except rq.exceptions.Timeout:
@@ -421,6 +424,7 @@ def load_existing_settings_path(path: str) -> None:
         else:
             slot["pending"] = {}
     slot["settings_path"] = path
+    _link_settings_path_to_project(path)
 
 
 def create_new_settings_path(path: str) -> None:
@@ -451,6 +455,132 @@ def create_new_settings_path(path: str) -> None:
     else:
         slot["pending"] = {}
     slot["settings_path"] = path
+    _link_settings_path_to_project(path)
+
+
+#: Where the active settings file is remembered inside the QGIS project file
+#: (`QgsProject.writeEntry`), so reopening the project -- even after a QGIS
+#: restart -- reactivates it. The paths themselves stay in the settings
+#: file's `qthermonet_cache`; the project only stores which file that is.
+_PROJECT_ENTRY_SCOPE = "QThermonet"
+_PROJECT_ENTRY_KEY = "settings_path"
+
+
+def _link_settings_path_to_project(path: str) -> None:
+    """Store `path` in the project, only if it changed (avoids a needless "unsaved")."""
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    current, ok = project.readEntry(_PROJECT_ENTRY_SCOPE, _PROJECT_ENTRY_KEY)
+    if not ok or current != path:
+        project.writeEntry(_PROJECT_ENTRY_SCOPE, _PROJECT_ENTRY_KEY, path)
+
+
+#: The project file name seen last, to tell the transitions apart (signal
+#: order verified 2026-10-01): opening a project goes name → "" (cleared) →
+#: readProject → name; a first save goes "" → name with no readProject; a
+#: "Save As" goes straight from one name to another, before the file is
+#: written.
+_project_state = {"file_name": "", "reading": False}
+
+
+def on_project_read(_document=None) -> None:
+    """Reactivate the settings file the opened project is linked to.
+
+    Connected to `QgsProject.readProject`; does nothing if the project has
+    no link or the linked file no longer exists.
+
+    Parameters
+    ----------
+    _document : QDomDocument or None
+        Passed by the signal; unused.
+
+    """
+    from qgis.core import QgsProject
+
+    _project_state["reading"] = True
+    path, ok = QgsProject.instance().readEntry(_PROJECT_ENTRY_SCOPE, _PROJECT_ENTRY_KEY)
+    if not ok or not path:
+        return
+    if os.path.isfile(path):
+        load_existing_settings_path(path)
+    else:
+        # Linked file deleted/moved: don't keep pointing at it from earlier
+        # in this session -- the tools then start without saved paths.
+        _project_slot()["settings_path"] = None
+
+
+def on_project_file_name_changed() -> None:
+    """Handle "Save As" (reset the link) and a first save (keep the session).
+
+    Connected to `QgsProject.fileNameChanged`.
+    """
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    old, new = _project_state["file_name"], project.fileName()
+    if old and new and os.path.normcase(old) != os.path.normcase(new):
+        # Save As: the copy starts without a settings file, like a new
+        # project (its session slot is new too, being keyed by file name).
+        project.removeEntry(_PROJECT_ENTRY_SCOPE, _PROJECT_ENTRY_KEY)
+    elif not old and new and not _project_state["reading"]:
+        # First save of a new project: keep what this session already knew.
+        _carry_session_over("", new)
+    _project_state["file_name"] = new
+    _project_state["reading"] = False
+
+
+def on_project_cleared() -> None:
+    """Forget the unsaved project's session state on "New project" / before opening one.
+
+    Connected to `QgsProject.cleared`.
+    """
+    _session_cache.pop("", None)
+
+
+def _carry_session_over(old_key: str, new_key: str) -> None:
+    """Move one project's session slot to another key (first save of a new project)."""
+    old_slot = _session_cache.pop(old_key, None)
+    if not old_slot:
+        return
+    new_slot = _session_cache.setdefault(new_key, {"settings_path": None, "pending": {}})
+    new_slot["pending"] = {**old_slot.get("pending", {}), **new_slot.get("pending", {})}
+    if new_slot.get("settings_path") is None and old_slot.get("settings_path"):
+        new_slot["settings_path"] = old_slot["settings_path"]
+    for key in ("setup_asked", "crs_choice", "overwrite_confirm_off"):
+        if key in old_slot and key not in new_slot:
+            new_slot[key] = old_slot[key]
+
+
+def connect_project_signals() -> None:
+    """Connect the project-link handlers above; call once when the plugin loads."""
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    project.readProject.connect(on_project_read)
+    project.fileNameChanged.connect(on_project_file_name_changed)
+    project.cleared.connect(on_project_cleared)
+    _project_state["file_name"] = project.fileName()
+    if project.fileName():
+        # Plugin (re)loaded with a project already open.
+        on_project_read()
+        _project_state["reading"] = False
+
+
+def disconnect_project_signals() -> None:
+    """Disconnect the project-link handlers; call when the plugin unloads."""
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    for signal, handler in (
+        (project.readProject, on_project_read),
+        (project.fileNameChanged, on_project_file_name_changed),
+        (project.cleared, on_project_cleared),
+    ):
+        try:
+            signal.disconnect(handler)
+        except (TypeError, RuntimeError):
+            pass
 
 
 def get_cached_path(role: str) -> str | None:

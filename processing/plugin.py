@@ -64,7 +64,10 @@ class QThermonetPlugin(object):
 
     def initGui(self):
         self.initProcessing()
-        
+        # Reactivate the settings file a project is linked to when it's opened
+        # (and reset the link on "Save As") -- see utils.connect_project_signals.
+        utils.connect_project_signals()
+
         # Check if the menu already exists, and create it if not
         self.menu = self.iface.mainWindow().menuBar().findChild(QMenu, "&QThermonet")
         if not self.menu:
@@ -211,6 +214,8 @@ class QThermonetPlugin(object):
         # self.iface.addToolBarIcon(self.action_qpythermonet)
     
     def unload(self):
+        utils.disconnect_project_signals()
+
         # Clean up all actions via the tracked list
         for action in self.plugin_actions:
             try:

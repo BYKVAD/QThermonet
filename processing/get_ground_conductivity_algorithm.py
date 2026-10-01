@@ -49,6 +49,7 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination
     )
 from pythermonet.input import load_settings
+from .. import output_handling
 from ..utils import (
     calculate_tc,
     default_save_directory,
@@ -169,7 +170,15 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo("Calculating input coordinates...")
         centerX, centerY = get_representative_point(input_area_layer)
         feedback.pushInfo(f"Coordinates (EPSG:25832): X={centerX}, Y={centerY}")
-        
+
+        # The figure's file name depends only on the center point and depth,
+        # so ask about overwriting now -- before the ~10 GEUS requests, not
+        # after them. Safe here: this algorithm runs on the main thread
+        # (FlagNoThreading, see flags()).
+        out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}_{input_depth}m.png")
+        if not output_handling.confirm_overwrite([out_path]):
+            raise QgsProcessingException("Cancelled -- no files were changed.")
+
         # #Hardcode for temporary check
         # centerX = 520000
         # centerY = 6200000
@@ -194,22 +203,22 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo(f"{layer['name']}: {layer['top']}m.b.g. to {layer['bottom']}m.b.g.")
 
 
-       	# Step 3: Unpack the json data structure and create a figure of the local geology
-       	layers      = data["layers"]
-       	groundlevel = data["groundlevel"]
-       	phreatic    = data["phreatic"]
+        # Step 3: Unpack the json data structure and create a figure of the local geology
+        layers      = data["layers"]
+        groundlevel = data["groundlevel"]
+        phreatic    = data["phreatic"]
        
-       	# Define colors (random for now, later use GEUS standard colors)
-       	unique_names = list({layer["name"] for layer in layers})
-       	cmap         = plt.get_cmap("tab20", len(unique_names))
-       	colour_map   = {name: cmap(i) for i, name in enumerate(unique_names)}
+        # Define colors (random for now, later use GEUS standard colors)
+        unique_names = list({layer["name"] for layer in layers})
+        cmap         = plt.get_cmap("tab20", len(unique_names))
+        colour_map   = {name: cmap(i) for i, name in enumerate(unique_names)}
        
-       	# Initiate figure
-       	# fig, (ax_a, ax_b) = plt.subplots(
-        #    	1, 2,
-        #    	figsize       = (10, 11),
-        #    	gridspec_kw   = {"wspace": 0.45},
-       	# )
+        # Initiate figure
+        # fig, (ax_a, ax_b) = plt.subplots(
+        #       1, 2,
+        #       figsize       = (10, 11),
+        #       gridspec_kw   = {"wspace": 0.45},
+        # )
         fig = plt.figure(figsize=(13, 11))
         gs  = GridSpec(
             1, 5,
@@ -225,38 +234,38 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ax_b    = fig.add_subplot(gs[0, 3])
         ax_b_tc = fig.add_subplot(gs[0, 4])
         
-       	fig.suptitle(
-           	f"Geological Depth Profile  |  X={centerX}, Y={centerY}",
-           	fontsize=11, fontweight="bold", y=0.98,
-       	)
+        fig.suptitle(
+                f"Geological Depth Profile  |  X={centerX}, Y={centerY}",
+                fontsize=11, fontweight="bold", y=0.98,
+        )
        
         
-       	# Fig. 1A: Full geological profile (upper 1 km)
-       	panel_a_top    = groundlevel
+        # Fig. 1A: Full geological profile (upper 1 km)
+        panel_a_top    = groundlevel
         panel_a_bottom = groundlevel - 1000 # max(l["bottom"] for l in layers)
-       	self.draw_panel(
-           	ax_a, layers, groundlevel, phreatic, colour_map,
-           	y_min_elev = panel_a_top,
-           	y_max_elev = panel_a_bottom,
-           	title      = "Panel A – Upper 1 km", 
+        self.draw_panel(
+                ax_a, layers, groundlevel, phreatic, colour_map,
+                y_min_elev = panel_a_top,
+                y_max_elev = panel_a_bottom,
+                title      = "Panel A – Upper 1 km", 
              feedback   = feedback
              )
         self.draw_tc_panel(ax_a_tc, layers, groundlevel, panel_a_top, panel_a_bottom) #feedback
-    	
-       	# Fig. 1B: Zoom-in on geology down to depth that came with user input
-       	panel_b_top    = groundlevel
+        
+        # Fig. 1B: Zoom-in on geology down to depth that came with user input
+        panel_b_top    = groundlevel
         panel_b_bottom = groundlevel - input_depth      # depth metres below surface
-       	self.draw_panel(
-           	ax_b, layers, groundlevel, phreatic, colour_map,
-           	y_min_elev = panel_b_top,
-           	y_max_elev = panel_b_bottom,
-           	title      = f"Panel B – Upper {input_depth} m",
+        self.draw_panel(
+                ax_b, layers, groundlevel, phreatic, colour_map,
+                y_min_elev = panel_b_top,
+                y_max_elev = panel_b_bottom,
+                title      = f"Panel B – Upper {input_depth} m",
              feedback   = feedback
-       	)
+        )
         self.draw_tc_panel(ax_b_tc, layers, groundlevel, panel_b_top, panel_b_bottom) #feedback
        
-       	# legend
-       	# Sort unique names by their top value (shallowest first)
+        # legend
+        # Sort unique names by their top value (shallowest first)
         sorted_names = sorted(unique_names, key=lambda name: next(l["top"] for l in layers if l["name"] == name))
         
         patches = [
@@ -265,7 +274,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ]
                      
        
-       	# Step 4: Calculate ground thermal conductivity based on json output and check spatial sensitivity          
+        # Step 4: Calculate ground thermal conductivity based on json output and check spatial sensitivity          
         offset     = 500  # metres
         offsets    = [
             ( 0,       0),       # center
@@ -373,11 +382,14 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         fig.subplots_adjust(bottom=0.28)  # increase bottom margin to fit both text box and legend
         
         
-       	#Save figure
-       	os.makedirs(output_folder, exist_ok=True)
-       	out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}_{input_depth}m.png")
-       	fig.savefig(out_path, dpi=150, bbox_inches="tight")
-       	feedback.pushInfo(f"Figure saved to: {out_path}")
+        #Save figure
+        # `out_path` was settled (and the overwrite confirmed) right after
+        # step 1. Written in one step and never loaded as a layer, so no
+        # temp-file swap is needed (unlike the other tools' outputs).
+        os.makedirs(output_folder, exist_ok=True)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)  # pyplot keeps every figure alive otherwise -- one per run
+        feedback.pushInfo(f"Figure saved to: {out_path}")
 
         # Step 6: Optionally overwrite soil.thermal_conductivity in a
         # settings file with the center-point result (tc_depthavg) -- not
