@@ -116,16 +116,16 @@ class QThermonetPlugin(object):
         # self.menu.addAction(self.action_aggregated_load)
         # self.plugin_actions.append(self.action_aggregated_load)
         
-        # Tool: Pipe hierarchy
-        icon_pipe_hierarchy = utils.get_logo('logo6-pipes-simple.png')
-        # icon_pipe_hierarchy = os.path.join(cmd_folder, 'logo6-pipes-simple.png')
-        self.action_pipe_hierarchy = QAction(
-            QIcon(icon_pipe_hierarchy),
-            u"Optional: Pipe Hierarchy", self.iface.mainWindow())
-        self.action_pipe_hierarchy.triggered.connect(self.run_PipeHierarchy)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_pipe_hierarchy)
-        self.menu.addAction(self.action_pipe_hierarchy)
-        self.plugin_actions.append(self.action_pipe_hierarchy)
+        # Tool: Main pipe hierarchy
+        icon_main_pipe_hierarchy = utils.get_logo('logo6-pipes-simple.png')
+        # icon_main_pipe_hierarchy = os.path.join(cmd_folder, 'logo6-pipes-simple.png')
+        self.action_main_pipe_hierarchy = QAction(
+            QIcon(icon_main_pipe_hierarchy),
+            u"Main Pipe Hierarchy", self.iface.mainWindow())
+        self.action_main_pipe_hierarchy.triggered.connect(self.run_MainPipeHierarchy)
+        self.iface.addPluginToMenu(u"&QThermonet", self.action_main_pipe_hierarchy)
+        self.menu.addAction(self.action_main_pipe_hierarchy)
+        self.plugin_actions.append(self.action_main_pipe_hierarchy)
         
         # Tool: Service pipes
         icon_service_pipes = utils.get_logo('logo-servicep.png')
@@ -239,25 +239,25 @@ class QThermonetPlugin(object):
         
             
     def run_GetbuildingsinAOI(self):
-        processing.execAlgorithmDialog("QThermonet:get_buildings_and_bbr")
+        utils.open_algorithm_dialog("QThermonet:get_buildings_and_bbr")
         
     def run_ToggleThermonet(self):
-        processing.execAlgorithmDialog("QThermonet:toggle_thermonet_buildings")
+        utils.open_algorithm_dialog("QThermonet:toggle_thermonet_buildings")
         
     def run_LoadCalculation(self):
-        processing.execAlgorithmDialog("QThermonet:load_calculation")
+        utils.open_algorithm_dialog("QThermonet:load_calculation")
         
     # def run_AggregatedLoads(self):
     #     processing.execAlgorithmDialog("QThermonet:Calculate aggregated heat load")
     
-    def run_PipeHierarchy(self):
-        processing.execAlgorithmDialog("QThermonet:pipe_hierarchy")
+    def run_MainPipeHierarchy(self):
+        utils.open_algorithm_dialog("QThermonet:main_pipe_hierarchy")
         
     def run_ShortestServicePipes(self):
-        processing.execAlgorithmDialog("QThermonet:service_pipes")
+        utils.open_algorithm_dialog("QThermonet:service_pipes")
         
     def run_GetGroundConductivity(self):
-        processing.execAlgorithmDialog("QThermonet:get_ground_conductivity")
+        utils.open_algorithm_dialog("QThermonet:get_ground_conductivity")
 
     def run_SettingsEditor(self):
         dlg = SettingsEditorDialog(self.iface.mainWindow())
@@ -268,10 +268,10 @@ class QThermonetPlugin(object):
         dlg.exec()
 
     def run_PipeTopology(self):
-        processing.execAlgorithmDialog("QThermonet:pipe_topology")
+        utils.open_algorithm_dialog("QThermonet:pipe_topology")
                 
     def run_FullDimensioning(self):
-        processing.execAlgorithmDialog("QThermonet:full_dimensioning")
+        utils.open_algorithm_dialog("QThermonet:full_dimensioning")
         
     # def run_qpythermonet(self):
     #     processing.execAlgorithmDialog("QThermonet:Dimension sources")

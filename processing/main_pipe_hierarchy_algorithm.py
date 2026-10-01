@@ -32,7 +32,7 @@ __revision__ = '$Format:%H$'
 
 import os
 import inspect
-from .. import utils
+from .. import output_handling, utils
 from collections import deque
 from qgis import processing
 from qgis.PyQt.QtGui import QIcon
@@ -49,6 +49,8 @@ from qgis.core import (
                        QgsProcessing,
                        QgsProcessingAlgorithm,
                        QgsProcessingException,
+                       QgsProcessingParameterBoolean,
+                       QgsProcessingParameterDefinition,
                        QgsProcessingParameterFeatureSource,
                        QgsProcessingParameterFileDestination,
                        QgsProcessingParameterVectorLayer,
@@ -59,12 +61,62 @@ from qgis.core import (
                        QgsWkbTypes
                        )
 
-class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
-    
+
+def style_main_pipes(layer):
+    """Apply the default main-pipe styling (plain black lines).
+
+    Parameters
+    ----------
+    layer : QgsVectorLayer
+        A freshly loaded main pipe hierarchy layer.
+
+    """
+    # Dynamic symbology, (not functioning)
+    # # Define dynamic width parameters:
+    # min_width = 0.25  # thinner for high Level values
+    # max_width = 1.5   # thicker for low Level values
+
+    # # Create a basic line symbol.
+    # symbol = QgsLineSymbol.createSimple({})
+
+    # # Build the expression for dynamic width.
+    # # This expression scales the "Level" field so that:
+    # # - minimum("Level") results in max_width (thicker line)
+    # # - maximum("Level") results in min_width (thinner line)
+    # width_expr = 'scale_linear("Level", minimum("Level"), maximum("Level"), {maxw}, {minw})'.format(
+    #     maxw=max_width, minw=min_width
+    # )
+
+    # # Get the symbol layer (assuming the first one) and set its data-defined width.
+    # symbol_layer = symbol.symbolLayer(0)
+    # try:
+    #     # Preferred: using the enum for width.
+    #     symbol_layer.setDataDefinedProperty(QgsSymbolLayer.PropertyWidth, QgsProperty.fromExpression(width_expr))
+    # except Exception as e:
+    #     # If that fails (e.g., due to version differences), try using the string key "width".
+    #     symbol_layer.setDataDefinedProperty("width", QgsProperty.fromExpression(width_expr))
+
+    # # Apply the symbol to a single symbol renderer and set it on the layer.
+    # renderer = QgsSingleSymbolRenderer(symbol)
+    # layer.setRenderer(renderer)
+
+    line_symbol = QgsLineSymbol.createSimple({ # Create the main line symbol
+        'color': 'black',  # Line color
+        'width': '1.1',  # Line width
+    })
+    layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
+
+
+class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
+
     #Handle input/output
     PIPES_LAYER = "PIPES_LAYER"
-    SOURCE_LAYER = "SOURCE_LAYER" 
+    SOURCE_LAYER = "SOURCE_LAYER"
     OUTPUT = "OUTPUT"
+    #: Hidden; `True` when Build Pipe Network runs this tool as one of its
+    #: steps -- then no overwrite pop-up, no temp-file swap, no path caching
+    #: and no layer loading (see output_handling.OutputSet's step mode).
+    RUN_AS_STEP = "RUN_AS_STEP"
 
     
     def initAlgorithm(self, config=None):
@@ -74,6 +126,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
                 self.PIPES_LAYER,
                 "Select the main pipes Layer",
                 [QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("roads_file"),
             )
         
         param.setHelp(
@@ -90,6 +143,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
                 self.SOURCE_LAYER,
                 "Select the source placement layer",
                 [QgsProcessing.TypeVectorPoint, QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("source_file"),
             )
         param.setHelp(
             "The output of the 'Source Placement' tool:\n"
@@ -108,18 +162,72 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
                 self.OUTPUT,
                 self.tr('Output GeoJSON'),
                 fileFilter="GeoJSON (*.geojson)",  # Filter for file type
-                defaultValue=os.path.join(utils.default_save_directory(), "pipe_hierarchy.geojson")
+                defaultValue=os.path.join(utils.default_save_directory(), "main_pipe_hierarchy.geojson")
             )
         )
 
+        param = QgsProcessingParameterBoolean(self.RUN_AS_STEP, "Run as a step", defaultValue=False)
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagHidden)
+        self.addParameter(param)
+
+    def checkParameterValues(self, parameters, context):
+        ok, message = super().checkParameterValues(parameters, context)
+        if not ok:
+            return ok, message
+
+        # An HHE trench layer is itself a line layer, so the pipes dropdown
+        # can silently pre-select it -- the run then "succeeds" with the
+        # trenches as the whole pipe network and no mains at all.
+        pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
+        if pipes_layer is not None and "is_connection_node" in pipes_layer.fields().names():
+            return False, (
+                f"The selected main pipes layer ('{pipes_layer.name()}') looks like "
+                "a Source Placement output (it has an 'is_connection_node' field). "
+                "Select the main pipes/roads layer instead."
+            )
+        return True, ""
+
+    def prepareAlgorithm(self, parameters, context, feedback):
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.PIPES_LAYER):
+            return False
+        if not self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context):
+            output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
+            if not output_handling.confirm_overwrite([output_path]):
+                feedback.reportError("Cancelled -- no files were changed.")
+                return False
+        return True
+
     def processAlgorithm(self, parameters, context, feedback):
-        
+        output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
+        self._outputs = output_handling.OutputSet(
+            step_mode=self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context)
+        )
+        temp_path = self._outputs.add_file(
+            output_path,
+            layer_name="Main pipe hierarchy",
+            cache_roles=["mains_file"],
+            style_default=style_main_pipes,
+        )
+        try:
+            self._build_hierarchy(parameters, context, feedback, temp_path)
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return {self.OUTPUT: output_path}
+
+    def postProcessAlgorithm(self, context, feedback):
+        self._outputs.commit(feedback)
+        return {}
+
+    def _build_hierarchy(self, parameters, context, feedback, output_path):
+        """Build the pipe hierarchy and write it to `output_path` (a temp path)."""
         input_pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
         input_source_layer = self.parameterAsVectorLayer(parameters, self.SOURCE_LAYER, context)
-        output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
-        
+
         ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
-        default_projected_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+        default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
         def is_geographic(crs):
             return crs.isGeographic()
         
@@ -158,6 +266,31 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             source_layer_proj = input_source_layer
 
         
+        ## Step 0.5: Self-snap the pipes layer within a small tolerance before
+        # building any topology from it. A hand-digitized edit's endpoint
+        # landing a millimeter away from an existing vertex -- rather than
+        # exactly on it -- survives dissolve+split as a hairline sliver
+        # segment (near-zero length, its own spurious Level). That segment
+        # later gets a pressure-loss budget of essentially 0 m -> 0 Pa,
+        # which pythermonet's hydraulic dimensioning cannot satisfy with any
+        # pipe diameter, regardless of the rest of the network being fine.
+        # BEHAVIOR=2 ("Prefer aligning nodes, don't insert new vertices")
+        # only pulls existing near-duplicate vertices together -- it doesn't
+        # add new ones, so it can't introduce a *different* sliver itself.
+        snapped_pipes = processing.run(
+            "native:snapgeometries",
+            {
+                'INPUT': pipes_layer_proj,
+                'REFERENCE_LAYER': pipes_layer_proj,
+                'TOLERANCE': 0.05,  # m -- generous for imprecise hand digitizing
+                'BEHAVIOR': 2,
+                'OUTPUT': 'memory:'
+            },
+            context=context,
+            feedback=feedback
+        )
+        pipes_layer_proj = snapped_pipes['OUTPUT']
+
         ## Step 1: Dissolve pipes layer and add to new output layer
         dissolved_pipes = processing.run(
             "native:dissolve",
@@ -168,7 +301,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             },
             context=context,
             feedback=feedback
-        )                
+        )
         dissolved_pipes_layer = dissolved_pipes['OUTPUT']
         
         
@@ -210,6 +343,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
                 feedback.pushInfo(f"Feature {feature.id()} - ERROR: {expression.evalErrorString()}")
                 continue
         
+            utils.raise_if_nan(ellip_length, "a pipe length")
             updated_features[feature.id()] = {provider.fieldNameIndex(field_name): ellip_length}
         
         # Apply changes
@@ -284,6 +418,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
                 feedback.pushInfo(f"Feature {feature.id()} - ERROR: {expression.evalErrorString()}")
                 continue
         
+            utils.raise_if_nan(ellip_length, "a pipe length")
             updated_features[feature.id()] = {provider.fieldNameIndex(field_name): ellip_length}
         
         # Apply changes
@@ -296,26 +431,18 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo("Warning: No valid geometries found.")
         
         
-        ## Step 7: Reproject and export the pipes layer and add to map
-        output_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-        
-        pipes_layer_wgs84 = processing.run(
-            "native:reprojectlayer",
-            {
-                'INPUT': pipes_layer,
-                'TARGET_CRS': output_crs,
-                'OUTPUT': 'memory:'
-            },
-            context=context,
-            feedback=feedback
-        )['OUTPUT']
-
+        ## Step 7: Export the pipes layer (loading it onto the map happens
+        # afterwards, in postProcessAlgorithm). Written in the projected CRS
+        # it was built in -- the input's own CRS when that's already
+        # projected -- not reprojected to EPSG:4326: this file is a working
+        # input for the other QThermonet tools, which all need metres (same
+        # reasoning as get_buildings_and_bbr_algorithm.py's output CRS).
         save_options = QgsVectorFileWriter.SaveVectorOptions()
         save_options.driverName = "GeoJSON"
         save_options.fileEncoding = "UTF-8"
 
         error = QgsVectorFileWriter.writeAsVectorFormatV3(
-            pipes_layer_wgs84,
+            pipes_layer,
             output_path,
             context.transformContext(),
             save_options
@@ -323,64 +450,17 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         
         error_code = error[0] if isinstance(error, tuple) else error
     
-        if error_code == QgsVectorFileWriter.NoError:                    
-            feedback.pushInfo(f"Layer successfully exported to {output_path}")
-        else:
-            feedback.pushInfo(f"Failed to export the layer. Error code: {error}")
-    
-        # Load your dissolved pipes layer
-        layer_name = os.path.splitext(os.path.basename(output_path))[0]
-        layer = QgsVectorLayer(output_path, layer_name, "ogr")
-        if not layer.isValid():
-            raise QgsProcessingException("Could not load the output layer!")
-        QgsProject.instance().addMapLayer(layer)
-        
-        # Dynamic symbology, (not functioning)
-        # # Define dynamic width parameters:
-        # min_width = 0.25  # thinner for high Level values
-        # max_width = 1.5   # thicker for low Level values
-        
-        # # Create a basic line symbol.
-        # symbol = QgsLineSymbol.createSimple({})
-        
-        # # Build the expression for dynamic width.
-        # # This expression scales the "Level" field so that:
-        # # - minimum("Level") results in max_width (thicker line)
-        # # - maximum("Level") results in min_width (thinner line)
-        # width_expr = 'scale_linear("Level", minimum("Level"), maximum("Level"), {maxw}, {minw})'.format(
-        #     maxw=max_width, minw=min_width
-        # )
-        
-        # # Get the symbol layer (assuming the first one) and set its data-defined width.
-        # symbol_layer = symbol.symbolLayer(0)
-        # try:
-        #     # Preferred: using the enum for width.
-        #     symbol_layer.setDataDefinedProperty(QgsSymbolLayer.PropertyWidth, QgsProperty.fromExpression(width_expr))
-        # except Exception as e:
-        #     # If that fails (e.g., due to version differences), try using the string key "width".
-        #     symbol_layer.setDataDefinedProperty("width", QgsProperty.fromExpression(width_expr))
+        if error_code != QgsVectorFileWriter.NoError:
+            raise QgsProcessingException(f"Failed to export the layer. Error: {error}")
 
-        # # Apply the symbol to a single symbol renderer and set it on the layer.
-        # renderer = QgsSingleSymbolRenderer(symbol)
-        # layer.setRenderer(renderer)
-
-        line_symbol = QgsLineSymbol.createSimple({ # Create the main line symbol
-            'color': 'black',  # Line color
-            'width': '1.1',  # Line width
-        })
-        layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
-        layer.triggerRepaint() # Refresh the layer to apply the changes
-    
-        ## Finish up
         feedback.pushInfo("Processing completed successfully.")
-        return {
-            self.OUTPUT: output_path
-            }
-    
-    #: Warn (not fail) if the connection node ends up farther than this from
-    #: the nearest pipe -- suggests the user forgot to snap it to the
-    #: network when placing it in Source Placement.
-    CONNECTION_NODE_SNAP_TOLERANCE = 0.5  # m
+
+    #: Warn (not fail) if the connection node is farther than this from an
+    #: *end* of the root pipe -- the same test (and value) the Modelica
+    #: export uses to connect the source to the network
+    #: (`modelica_export._CONNECTION_NODE_SNAP_TOLERANCE_M`), so a badly
+    #: snapped node shows up here instead of only at the export.
+    CONNECTION_NODE_SNAP_TOLERANCE = 0.1  # m
 
     def find_closest_pipe(self, split_pipes_layer, source_layer_proj, context, feedback):
         """Finds the pipe segment closest to the source layer's connection node, for level 0."""
@@ -405,6 +485,7 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
         min_distance = float("inf")
         closest_feature_id = None
+        closest_geom = None
 
         # Find the closest pipe segment
         for feature in split_pipes_layer.getFeatures():
@@ -413,19 +494,28 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             if distance < min_distance:
                 min_distance = distance
                 closest_feature_id = feature.id()
+                closest_geom = pipe_geom
 
-        # Update the level attribute of the closest segment
-        if closest_feature_id is not None:
-            if min_distance > self.CONNECTION_NODE_SNAP_TOLERANCE:
-                feedback.reportError(
-                    f"The connection node is {min_distance:.2f} m from the nearest pipe "
-                    f"(tolerance: {self.CONNECTION_NODE_SNAP_TOLERANCE} m) -- did you forget "
-                    "to snap it to the pipe network when placing it in Source Placement?",
-                    fatalError=False,
-                )
-            return closest_feature_id  # Return the ID of the root pipe
+        if closest_feature_id is None:
+            return None
 
-        return None
+        # The node must sit on an *end* of the root pipe, not just near the
+        # line -- that's what the Modelica export needs to connect the source.
+        parts = closest_geom.asMultiPolyline() if closest_geom.isMultipart() else [closest_geom.asPolyline()]
+        node = source_geom.asPoint()
+        end_distance = min(
+            node.distance(end) for part in parts if part for end in (part[0], part[-1])
+        )
+        if end_distance > self.CONNECTION_NODE_SNAP_TOLERANCE:
+            feedback.reportError(
+                f"The connection node is {end_distance:.2f} m from the nearest end of the "
+                f"root pipe (tolerance: {self.CONNECTION_NODE_SNAP_TOLERANCE} m). The "
+                "hierarchy is still built, but the Modelica export won't connect the "
+                "source to the pipe network. In Source Placement, snap the connection "
+                "node exactly onto the end of the pipe/road and export again.",
+                fatalError=False,
+            )
+        return closest_feature_id  # Return the ID of the root pipe
 
     def get_connection_node_geometry(self, source_layer):
         """Extract the connection-node point from a Source Placement output layer.
@@ -594,16 +684,17 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         return connected_segments
   
     def name(self):
-        return 'pipe_hierarchy'
+        return 'main_pipe_hierarchy'
 
     def displayName(self):
-        return self.tr('Optional: Pipe Hierarchy')
+        return self.tr('Main Pipe Hierarchy')
 
     def group(self):
         return self.tr(self.groupId())
 
     def groupId(self):
         return '2. Thermonet'
+
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -625,10 +716,11 @@ class PipeHierarchyAlgorithm(QgsProcessingAlgorithm):
                 "BHE point layer or an HHE trench line layer -- with the feature flagged "
                 "'is_connection_node' marking where the field connects to the network. "
                 "A warning is shown if that node is more than "
-                f"{PipeHierarchyAlgorithm.CONNECTION_NODE_SNAP_TOLERANCE} m from the "
-                "nearest pipe, suggesting it wasn't snapped to the network.</p>"
+                f"{MainPipeHierarchyAlgorithm.CONNECTION_NODE_SNAP_TOLERANCE} m from an "
+                "end of the nearest pipe, suggesting it wasn't snapped to the network "
+                "(the Modelica export needs it on a pipe end).</p>"
         )
-    
+
     def createInstance(self):
-        return PipeHierarchyAlgorithm()
+        return MainPipeHierarchyAlgorithm()
 

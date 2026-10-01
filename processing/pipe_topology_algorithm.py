@@ -39,6 +39,8 @@ from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterDefinition,
     QgsProcessingParameterFileDestination,
     QgsProcessingParameterVectorLayer,
     QgsProject,
@@ -52,7 +54,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis import processing
 import os
 import inspect
-from .. import utils
+from .. import output_handling, utils
 
 class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
     
@@ -61,6 +63,10 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
     SERVICE_PIPES_LAYER = "SERVICE_PIPES_LAYER"
     OUTPUT = "OUTPUT"
     DAT_OUTPUT = "DAT_OUTPUT"
+    #: Hidden; `True` when Build Pipe Network runs this tool as one of its
+    #: steps -- then no overwrite pop-up, no temp-file swap, no path caching
+    #: and no layer loading (see output_handling.OutputSet's step mode).
+    RUN_AS_STEP = "RUN_AS_STEP"
 
     def initAlgorithm(self, config=None):
         
@@ -69,6 +75,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                 self.PIPES_LAYER,
                 "Select the Pipes Layer",
                 [QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("mains_file"),
             )
         param.setHelp(
             "The input layer must:\n"
@@ -84,6 +91,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                 self.SERVICE_PIPES_LAYER,
                 "Select the Service Pipes Layer",
                 [QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("service_pipes_file"),
             )
         param.setHelp(
             "The service pipes layer must:\n"
@@ -114,18 +122,62 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        param = QgsProcessingParameterBoolean(self.RUN_AS_STEP, "Run as a step", defaultValue=False)
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagHidden)
+        self.addParameter(param)
+
+    def prepareAlgorithm(self, parameters, context, feedback):
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.PIPES_LAYER):
+            return False
+        if not self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context):
+            paths = [
+                self.parameterAsFileOutput(parameters, self.OUTPUT, context),
+                self.parameterAsFileOutput(parameters, "DAT_OUTPUT", context),
+            ]
+            if not output_handling.confirm_overwrite(paths):
+                feedback.reportError("Cancelled -- no files were changed.")
+                return False
+        return True
+
     def processAlgorithm(self, parameters, context, feedback):
-        pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
-        service_pipes_layer = self.parameterAsVectorLayer(parameters, self.SERVICE_PIPES_LAYER, context)
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
         dat_output_path = self.parameterAsFileOutput(parameters, "DAT_OUTPUT", context)
+        self._outputs = output_handling.OutputSet(
+            step_mode=self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context)
+        )
+        geojson_temp_path = self._outputs.add_file(
+            output_path,
+            layer_name="Pipe topology",
+            cache_roles=["topology_geojson_file"],
+        )
+        dat_temp_path = self._outputs.add_file(dat_output_path, cache_roles=["topology_dat_file"])
+        try:
+            self._run(parameters, context, feedback, geojson_temp_path, dat_temp_path)
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return {
+            self.OUTPUT: output_path,
+            "DAT_OUTPUT": dat_output_path,
+        }
 
-    
+    def postProcessAlgorithm(self, context, feedback):
+        self._outputs.commit(feedback)
+        return {}
+
+    def _run(self, parameters, context, feedback, output_path, dat_output_path):
+        """Build the topology and write both outputs to the given (temp) paths."""
+        pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
+        service_pipes_layer = self.parameterAsVectorLayer(parameters, self.SERVICE_PIPES_LAYER, context)
+
+
         if not pipes_layer or not service_pipes_layer:
             raise QgsProcessingException("Invalid input layers!")
-            
+
         ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
-        default_projected_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+        default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
         
         # Helper: check if CRS is geographic (i.e., degrees)
         def is_geographic(crs):
@@ -165,8 +217,35 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo(f"Source layer is already projected: {service_pipes_layer.crs().authid()}")
             service_pipes_layer_proj = service_pipes_layer
 
-            
-            
+        # ...then a final check catches the remaining case: both already
+        # projected (so neither branch above ran), but in two different
+        # projected CRSs -- the 0.1 m service-pipe search below would then
+        # compare coordinates from different systems and find nothing.
+        # Same check as service_pipes_algorithm.py.
+        if service_pipes_layer_proj.crs() != pipes_layer_proj.crs():
+            feedback.pushInfo(
+                f"Service pipes layer ({service_pipes_layer_proj.crs().authid()}) and pipes layer "
+                f"({pipes_layer_proj.crs().authid()}) are in different CRSs, reprojecting "
+                f"service pipes layer to match pipes layer."
+            )
+            service_pipes_layer_proj = processing.run(
+                "native:reprojectlayer",
+                {
+                    'INPUT': service_pipes_layer_proj,
+                    'TARGET_CRS': pipes_layer_proj.crs(),
+                    'OUTPUT': 'memory:'
+                },
+                context=context,
+                feedback=feedback
+            )['OUTPUT']
+
+        # A cancelled reprojection returns an empty layer -- stop here with a
+        # clear message instead of failing further down on the empty input.
+        if feedback.isCanceled():
+            raise QgsProcessingException("Cancelled -- no files were changed.")
+        if pipes_layer_proj.featureCount() == 0:
+            raise QgsProcessingException("The pipes layer has no features.")
+
         # Define the fields for the output layer
         feedback.pushInfo("Creating the new fields ...")
         fields = QgsFields()
@@ -189,27 +268,16 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         # Set CRS from the service_pipes_layer
         crs = service_pipes_layer_proj.crs()
 
-        # Create a writer for the output layer
-        writer = QgsVectorFileWriter(
-            output_path,
-            "UTF-8",
-            fields,
-            QgsWkbTypes.LineString,
-            crs,
-            "GeoJSON", #"ESRI Shapefile",
-        )
+        # Collected in memory and written in one go at the end -- so no
+        # output file is open while the checks below can still raise (an
+        # open file couldn't be cleaned up after a failure on Windows).
+        out_features = []
+        dat_lines = ["Section\tSDR\tTrace_(m)\tNumber_of_traces\tMax_pressure_loss_(Pa)\tHP_ID_vector\n"]
 
-        if writer.hasError() != QgsVectorFileWriter.NoError:
-            raise QgsProcessingException(f"Error when creating the output shapefile: {writer.errorMessage()}")
-            
         # Prepare the $length expression
         expression = QgsExpression('$length')
         expr_context = QgsExpressionContext()
         expr_context.appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(service_pipes_layer_proj))
-        
-        # Open dat file in writing mode and write header        
-        dat_file = open(dat_output_path, "w", encoding="utf-8")
-        dat_file.write("Section\tSDR\tTrace_(m)\tNumber_of_traces\tMax_pressure_loss_(Pa)\tHP_ID_vector\n")
 
         # Copy features from the service pipes layer
         feedback.pushInfo("Handling service pipes ...")
@@ -226,6 +294,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             Trace_length = expression.evaluate(expr_context)
             if expression.hasEvalError():
                 raise QgsProcessingException(f"Expression evaluation error: {expression.evalErrorString()}")
+            utils.raise_if_nan(Trace_length, "a pipe length")
 
             #Update field values
             new_feature["Section"] = "Service_pipe_" + str(pipeNo)
@@ -234,10 +303,10 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature["Number_of_traces"] = 1
             new_feature["Max_pressure_loss_(Pa)"] = 180 * Trace_length
             new_feature["HP_ID_vector"] = feature["id.lokalId"]
-            writer.addFeature(new_feature)
-            
+            out_features.append(new_feature)
+
             # Update dat file
-            dat_file.write(
+            dat_lines.append(
                 f"{new_feature['Section']}\t{new_feature['SDR']}\t"
                 f"{float(new_feature['Trace_(m)']):.2f}\t"  # Explicitly format to 2 decimal places
                 f"{new_feature['Number_of_traces']}\t"
@@ -296,6 +365,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             Trace_length = expression.evaluate(expr_context)
             if expression.hasEvalError():
                 raise QgsProcessingException(f"Expression evaluation error: {expression.evalErrorString()}")
+            utils.raise_if_nan(Trace_length, "a pipe length")
             
             
             # Step 2: Retrieve Heat-pump ID's for each pipe
@@ -315,11 +385,12 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                 else:
                     feedback.pushInfo("Field 'id.lokalId' not found in feature.")
                     
-            # Combine IDs into a comma-separated string
-            combined_ids = ", ".join(connected_ids)
-                        
+            # Kept as a list (joined only when written out) so an empty
+            # contribution can't leave a stray ", " in the HP_ID_vector.
+            ids_list = [str(hp_id) for hp_id in connected_ids]
+
             # Print or assign the result
-            feedback.pushInfo(f"Pipe ID: {pipe_feature.id()}, Connected Service Pipes: {combined_ids}")
+            feedback.pushInfo(f"Pipe ID: {pipe_feature.id()}, Connected Service Pipes: {', '.join(ids_list)}")
             
             
             # Add HP ID's of lower-level connected pipes
@@ -336,14 +407,11 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                             # Retrieve HP_IDs for the other feature from the processed_features dictionary
                             other_id = other_feature.id()
                             if other_id in processed_features:
-                                higher_level_ids.append(processed_features[other_id])
-                
-                # Combine the higher-level HP_IDs into a single comma-separated string
-                if higher_level_ids:
-                    combined_ids += ", " + ", ".join(higher_level_ids)
-            
+                                higher_level_ids.extend(processed_features[other_id])
+
+                ids_list.extend(higher_level_ids)
+
             # Check for duplicates and issue a warning
-            ids_list = [id.strip() for id in combined_ids.split(",")]  # Split and strip whitespace
             id_counts = Counter(ids_list)  # Count occurrences of each ID
             unique_ids = sorted(set(ids_list))  # Deduplicate and sort
             duplicates = [id for id, count in id_counts.items() if count > 1] # Identify duplicates
@@ -353,7 +421,19 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                     f"Duplicate HP_IDs found and removed for HP_ID: {', '.join(duplicates)}, make sure this heatpump only connects to one pipe section"
                 )
             
-            # Reconstruct combined_ids as a comma-separated string
+            if not unique_ids:
+                geometry = pipe_feature.geometry()
+                midpoint = geometry.interpolate(geometry.length() / 2).asPoint()
+                raise QgsProcessingException(
+                    f"A main pipe (Level {current_level}, {Trace_length:.1f} m long, "
+                    f"midpoint at {midpoint.x():.1f}, {midpoint.y():.1f} in "
+                    f"{pipes_layer_proj.crs().authid()}) has no heat pumps connected "
+                    "to it or downstream of it -- a pipe carrying no flow can't be "
+                    "dimensioned. This is usually a stretch of the main pipes layer "
+                    "past the last connected building; trim it and re-run Main Pipe "
+                    "Hierarchy and Pipe Topology."
+                )
+
             combined_ids = ", ".join(unique_ids)
 
             # Update the current feature's combined_ids field
@@ -367,14 +447,14 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature["Number_of_traces"] = 1
             new_feature["Max_pressure_loss_(Pa)"] = 180 * Trace_length
             new_feature["HP_ID_vector"] = combined_ids
-            writer.addFeature(new_feature)
-            
+            out_features.append(new_feature)
+
             # Store the processed feature's HP_IDs in the dictionary
             current_id = pipe_feature.id()
-            processed_features[current_id] = combined_ids
+            processed_features[current_id] = unique_ids
 
             # Update dat file
-            dat_file.write(
+            dat_lines.append(
                 f"{new_feature['Section']}\t{new_feature['SDR']}\t"
                 f"{float(new_feature['Trace_(m)']):.2f}\t"  # Explicitly format to 2 decimal places
                 f"{new_feature['Number_of_traces']}\t"
@@ -383,23 +463,19 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             )
            
         
-        # Finalize the writer and close dat file
-        del writer
-        dat_file.close()
-        
-        # Add the new layer to the QGIS map
+        # Write both outputs now that every check has passed (loading the
+        # layer onto the map happens afterwards, in postProcessAlgorithm)
         feedback.pushInfo("") # Empty line for visibility of output
-        feedback.pushInfo("Adding layer to map ...")
-        new_layer = QgsVectorLayer(output_path, "Pipe Topology", "ogr")
-        if not new_layer.isValid():
-            raise QgsProcessingException(f"Could not load the output file: {output_path}")
-        QgsProject.instance().addMapLayer(new_layer)
+        feedback.pushInfo("Writing output files ...")
+        try:
+            output_handling.write_geojson(output_path, fields, QgsWkbTypes.LineString, crs, out_features)
+        except OSError as exc:
+            raise QgsProcessingException(str(exc)) from exc
+
+        with open(dat_output_path, "w", encoding="utf-8") as dat_file:
+            dat_file.writelines(dat_lines)
 
         feedback.pushInfo("Processing completed successfully.")
-        return {
-            self.OUTPUT: output_path,
-            "DAT_OUTPUT": dat_output_path,
-        }
         
     def find_features_within_distance(self, input_feature, reference_layer, distance):
         """
@@ -441,6 +517,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         formatting characters.
         """
         return '2. Thermonet'
+
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)

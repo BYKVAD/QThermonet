@@ -30,7 +30,6 @@ __copyright__ = '(C) 2026 by Jane Lund Andersen/VIA University College'
 
 __revision__ = '$Format:%H$'
 
-import dataclasses
 import os
 import requests as rq
 import inspect
@@ -50,8 +49,17 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination
     )
 from pythermonet.input import load_settings
-from pythermonet.output import save_settings
-from ..utils import calculate_tc, default_save_directory, fetch_api_data, get_representative_point, get_logo
+from ..utils import (
+    calculate_tc,
+    default_save_directory,
+    fetch_api_data,
+    get_cached_path,
+    get_current_settings_path,
+    get_logo,
+    get_representative_point,
+    maybe_prompt_project_setup,
+    update_settings_fields,
+)
 
 
 class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
@@ -67,15 +75,19 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         # 1st input
         param = QgsProcessingParameterFeatureSource(
                 self.INPUT_AREA,
-                "AOI (a single polygon, line, or point)",
+                "AOI, or source layer (polygon, line, or point)",
                 [QgsProcessing.TypeVectorPolygon,
                  QgsProcessing.TypeVectorLine,
-                 QgsProcessing.TypeVectorPoint]  # Only accept polygon, polyline, or point layers
+                 QgsProcessing.TypeVectorPoint],  # Only accept polygon, polyline, or point layers
+                defaultValue=get_cached_path("source_file")
             )
         param.setHelp(
             "The input layer must:\n"
-            "- Be a polygon, line, or point layer (shape or geojson format). \n"
-            "- Contain a single feature with the Area-Of-Interest. \n"
+            "- Be a polygon, line, or point layer (shape or geojson format).\n"
+            "- Be either a single-feature AOI polygon, or the 'Source Placement' "
+            "tool's output (a BHE borefield point layer or an HHE trench line "
+            "layer) -- any number of features is fine; the ground conductivity "
+            "is computed at the combined centroid of all of them.\n"
             "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
         )
         self.addParameter(param)
@@ -100,7 +112,8 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
                 self.SETTINGS_FILE,
                 "Settings file to update (optional)",
                 extension="json",
-                optional=True
+                optional=True,
+                defaultValue=get_current_settings_path()
             )
         param.setHelp(
             "Project settings file (.json) created/edited with the "
@@ -146,6 +159,10 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
         update_thermal_conductivity = self.parameterAsBoolean(
             parameters, self.UPDATE_THERMAL_CONDUCTIVITY, context
+        )
+
+        maybe_prompt_project_setup(
+            None, crs=input_area_layer.crs(), point=input_area_layer.extent().center(), feedback=feedback
         )
 
         # Step 1: Calculate the center coordinates of the AOI input (EPSG:25832)
@@ -386,11 +403,10 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
                     raise QgsProcessingException(
                         "Settings file has no 'soil' block to update."
                     )
-                settings["soil"] = dataclasses.replace(
-                    settings["soil"], thermal_conductivity=tc_depthavg
-                )
                 try:
-                    save_settings(settings_path, settings)
+                    update_settings_fields(
+                        settings_path, {"soil": {"thermal_conductivity": tc_depthavg}}
+                    )
                 except ValueError as exc:
                     raise QgsProcessingException(str(exc))
                 feedback.pushInfo(
@@ -619,8 +635,10 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         """
         return (
             "<p><b> This tool: </b> <p>"
-            "<p> 1.Calculates the ground thermal conductivity at the input AOI: polygon"
-            " centroid, line center, or point - averaged to the input depth. <p> "
+            "<p> 1. Calculates the ground thermal conductivity at the input layer's "
+            "combined centroid (a single AOI polygon's centroid, or the centroid of "
+            "every feature in a 'Source Placement' borefield/trench layer) - averaged "
+            "to the input depth. <p> "
             "<p> 2. Creates a report of the ground thermal conductivity based on"
             " the local geology and water content, and provides spatial and depth sensitivity "
             "estimates. The report is saved to the selected folder (png). "

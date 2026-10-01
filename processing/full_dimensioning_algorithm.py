@@ -32,29 +32,46 @@ __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
 
 __revision__ = '$Format:%H$'
 
+import json
 import os
 import tempfile
 
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
-from qgis.core import (QgsProcessingAlgorithm,
+from qgis.core import (Qgis,
+                       QgsCoordinateReferenceSystem,
+                       QgsCoordinateTransform,
+                       QgsCoordinateTransformContext,
+                       QgsEllipsoidUtils,
+                       QgsPointXY,
+                       QgsProcessingAlgorithm,
                        QgsProcessingException,
+                       QgsProcessingParameterBoolean,
                        QgsProcessingParameterFile,
                        QgsProcessingParameterFileDestination,
+                       QgsProcessingParameterFolderDestination,
                        QgsProcessingParameterString,
                        QgsVectorLayer)
 
-from .. import utils
-from ..settings_editor_dialog import ROLES_BHE, ROLES_HHE, detect_mode
-from ..source_placement_dialog import refresh_hhe_trench_layer, update_settings_fields
+from .. import output_handling, utils
+from ..settings_editor_dialog import ROLES_BHE, ROLES_HHE
+from ..source_placement_dialog import refresh_hhe_trench_layer
+from .modelica_export import (
+    build_boreholes_export,
+    build_heatpumps_export,
+    build_pipes_export,
+    build_settings_passthrough,
+    build_trenches_export,
+    connection_point_in_topology_crs,
+    write_modelica_export,
+)
 
 from pythermonet.components import (
     build_distribution_network,
     build_hhe_field,
     build_vhe_field,
     ground_loads_from_heat_pumps,
-    localize_borefield_coordinates,
 )
 from pythermonet.dimensioning import (
     HHEGroundField,
@@ -70,6 +87,78 @@ from pythermonet.input import (
     read_undimensioned_topology_tsv,
 )
 from pythermonet.output import print_bhe_results, print_hhe_results
+
+
+def _modelica_file_names(he_mode: str) -> list[str]:
+    """The files `write_modelica_export` writes for `he_mode` ("BHE" or "HHE")."""
+    if he_mode == "BHE":
+        return ["heatpumps.json", "pipes.json", "boreholes.json", "settings_bhe.json"]
+    return ["heatpumps.json", "pipes.json", "trenches.json", "settings_hhe.json"]
+
+
+def _localize_borefield_coordinates_qgis(borefield_input) -> list[list[float]]:
+    """Re-reference borehole coordinates to the first borehole, in meters -- via QGIS.
+
+    A QGIS-API twin of pythermonet's
+    `pythermonet.components.vhe_field.localize_borefield_coordinates`, with
+    the same result. pythermonet does this with pyproj, which crashes QGIS
+    ("access violation" in `proj_create`) the second time it's called from a
+    Processing background thread (reproduced 2026-10-01); QGIS's own
+    coordinate classes are safe there. Keep the two in sync -- the
+    regression test `tests/headless/test_localize_borefield.py` checks they
+    give the same result.
+
+    Parameters
+    ----------
+    borefield_input : pythermonet.components.vhe_field.BorefieldCoordinatesInput
+        Raw coordinates from `read_borefield_coordinates_tsv`; `crs` is e.g.
+        ``"EPSG:25832"``.
+
+    Returns
+    -------
+    list of list of float
+        `[x, y]` (or `[x, y, z]`) per borehole, in meters, relative to the
+        first borehole.
+
+    Raises
+    ------
+    QgsProcessingException
+        If the CRS is unknown, or projected in a unit other than meters.
+
+    """
+    crs = QgsCoordinateReferenceSystem(borefield_input.crs)
+    if not crs.isValid():
+        raise QgsProcessingException(f"Unknown borefield CRS: {borefield_input.crs}")
+    origin_x = float(borefield_input.x[0])
+    origin_y = float(borefield_input.y[0])
+
+    if crs.isGeographic():
+        # Local azimuthal-equidistant frame centred on the first borehole,
+        # on the CRS's own ellipsoid -- same as pythermonet.
+        ellipsoid = QgsEllipsoidUtils.ellipsoidParameters(crs.ellipsoidAcronym() or "EPSG:7030")
+        local_crs = QgsCoordinateReferenceSystem.fromProj(
+            f"+proj=aeqd +lat_0={origin_y} +lon_0={origin_x} "
+            f"+a={ellipsoid.semiMajor} +rf={ellipsoid.inverseFlattening} +units=m +no_defs"
+        )
+        transform = QgsCoordinateTransform(crs, local_crs, QgsCoordinateTransformContext())
+        points = [
+            transform.transform(QgsPointXY(float(x), float(y)))
+            for x, y in zip(borefield_input.x, borefield_input.y)
+        ]
+        local_x = [p.x() for p in points]
+        local_y = [p.y() for p in points]
+    else:
+        if crs.mapUnits() != Qgis.DistanceUnit.Meters:
+            raise QgsProcessingException(
+                f"{borefield_input.crs} is a projected CRS with unit "
+                f"'{Qgis.DistanceUnit(crs.mapUnits()).name}', not meters -- cannot localize."
+            )
+        local_x = [float(x) - origin_x for x in borefield_input.x]
+        local_y = [float(y) - origin_y for y in borefield_input.y]
+
+    if borefield_input.z is None:
+        return [[x, y] for x, y in zip(local_x, local_y)]
+    return [[x, y, float(z)] for x, y, z in zip(local_x, local_y, borefield_input.z)]
 
 
 def _borefield_geojson_to_dat(geojson_path: str) -> str:
@@ -133,6 +222,10 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
     INPUT_Topology = 'INPUT_Topology'
     SETTINGS_FILE = "SETTINGS_FILE"
     BOREHOLE_COORDINATES_FILE = "BOREHOLE_COORDINATES_FILE"
+    EXPORT_MODELICA = "EXPORT_MODELICA"
+    INPUT_Topology_GeoJSON = "INPUT_Topology_GeoJSON"
+    INPUT_Trenches_GeoJSON = "INPUT_Trenches_GeoJSON"
+    MODELICA_OUTPUT_FOLDER = "MODELICA_OUTPUT_FOLDER"
 
     def initAlgorithm(self, config=None):
         """
@@ -153,7 +246,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFile(
                 self.INPUT_LOAD,
                 self.tr("Input heat/cooling load file:"),
-                extension="dat"  # Restrict selection to dat files
+                extension="dat",  # Restrict selection to dat files
+                defaultValue=utils.get_cached_path("load_dat_file")
             )
         param.setHelp(
             "Heating and/or cooling loads for each heat pump (.dat)\n"
@@ -165,7 +259,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFile(
                 self.INPUT_Topology,
                 self.tr("Input topology file:"),
-                extension="dat"  # Restrict selection to dat files
+                extension="dat",  # Restrict selection to dat files
+                defaultValue=utils.get_cached_path("topology_dat_file")
             )
         param.setHelp(
             "Topology of the thermonet with pipes and service pipes"
@@ -177,7 +272,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFile(
                 self.SETTINGS_FILE,
                 self.tr("Settings file:"),
-                extension="json"
+                extension="json",
+                defaultValue=utils.get_current_settings_path()
             )
         param.setHelp(
             "Project settings file (.json) created/edited with the "
@@ -194,7 +290,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 self.BOREHOLE_COORDINATES_FILE,
                 self.tr("Borefield layer (BHE only):"),
                 extension="geojson",
-                optional=True
+                optional=True,
+                defaultValue=utils.get_cached_path("borefield_file")
             )
         param.setHelp(
             "GeoJSON borefield layer, as produced by the 'Source Placement' "
@@ -216,7 +313,123 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        # --- Modelica export -- toggle at the bottom of the dialog ---
+        param = QgsProcessingParameterBoolean(
+                self.EXPORT_MODELICA,
+                self.tr("Export project to Modelica"),
+                defaultValue=False,
+            )
+        param.setHelp(
+            "When checked, also write heatpumps.json, pipes.json, a "
+            "ground-field file (boreholes.json for BHE, trenches.json for "
+            "HHE), and a settings passthrough into the folder below. "
+            "Requires the topology GeoJSON below (and, for HHE, the "
+            "trenches GeoJSON) as well.\n"
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterFile(
+                self.INPUT_Topology_GeoJSON,
+                self.tr("Topology GeoJSON (required for Modelica export):"),
+                extension="geojson",
+                optional=True,
+                defaultValue=utils.get_cached_path("topology_geojson_file"),
+            )
+        param.setHelp(
+            "The geometry-carrying sibling of the topology .dat above, as "
+            "produced by the 'Pipe Topology' tool. Only needed when "
+            "'Export project to Modelica' is checked -- the .dat alone has "
+            "no geometry, so the Modelica export needs this to know where "
+            "each service pipe ties into the main pipe.\n"
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterFile(
+                self.INPUT_Trenches_GeoJSON,
+                self.tr("Trenches GeoJSON (HHE Modelica export only):"),
+                extension="geojson",
+                optional=True,
+                defaultValue=utils.get_cached_path("trenches_file"),
+            )
+        param.setHelp(
+            "GeoJSON trench layer, as produced by the 'Source Placement' "
+            "tool for an HHE project: line features (one flagged "
+            "'is_connection_node'). Only needed when 'Export project to "
+            "Modelica' is checked and the settings file above is an HHE "
+            "settings file; ignored for BHE.\n"
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterFolderDestination(
+                self.MODELICA_OUTPUT_FOLDER,
+                self.tr("Modelica export folder:"),
+                defaultValue=os.path.join(utils.default_save_directory(), "modelica-inputs"),
+                optional=True,
+            )
+        param.setHelp(
+            "Destination folder for the four Modelica-export files. Only "
+            "needed when 'Export project to Modelica' is checked.\n"
+        )
+        self.addParameter(param)
+
+    def prepareAlgorithm(self, parameters, context, feedback):
+        # No ready QgsVectorLayer this early (inputs are .dat/.json file
+        # paths, not layers) -- still worth the save-project check even
+        # without a layer to run CRS detection against.
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback):
+            return False
+
+        # Only the Modelica export goes through the overwrite check -- the
+        # OUTPUT CSV isn't written yet (a pythermonet concern, left as is).
+        if not self.parameterAsBoolean(parameters, self.EXPORT_MODELICA, context):
+            return True
+        folder = self.parameterAsString(parameters, self.MODELICA_OUTPUT_FOLDER, context)
+        settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
+        try:
+            with open(settings_path, encoding="utf-8") as f:
+                he_mode = utils.detect_mode(json.load(f))
+        except (OSError, json.JSONDecodeError):
+            he_mode = None  # the run itself reports a bad settings file properly
+        if not folder or he_mode is None:
+            return True
+        paths = [os.path.join(folder, name) for name in _modelica_file_names(he_mode)]
+        if not output_handling.confirm_overwrite(paths):
+            feedback.reportError("Cancelled -- no files were changed.")
+            return False
+        return True
+
     def processAlgorithm(self, parameters, context, feedback):
+        # The Modelica files are written to a temp folder and only moved into
+        # the real folder after a successful run (postProcessAlgorithm).
+        self._outputs = output_handling.OutputSet()
+        self._refresh_trenches_for = None
+        modelica_temp_folder = None
+        if self.parameterAsBoolean(parameters, self.EXPORT_MODELICA, context):
+            folder = self.parameterAsString(parameters, self.MODELICA_OUTPUT_FOLDER, context)
+            if folder:
+                modelica_temp_folder = self._outputs.add_folder(folder)
+        try:
+            result = self._run(parameters, context, feedback, modelica_temp_folder)
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return result
+
+    def postProcessAlgorithm(self, context, feedback):
+        if self._refresh_trenches_for is not None:
+            # A bonus on top of the run's results -- report a failure, but
+            # still move the Modelica files in below.
+            try:
+                refresh_hhe_trench_layer(self._refresh_trenches_for)
+            except output_handling.OutputCommitError as exc:
+                feedback.reportError(str(exc))
+        self._outputs.commit(feedback)
+        return {}
+
+    def _run(self, parameters, context, feedback, modelica_temp_folder):
+        """Run the dimensioning; write any Modelica export into `modelica_temp_folder`."""
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
         PID = self.parameterAsString(parameters, self.PID, context)
 
@@ -236,6 +449,21 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
 
         borefield_file = self.parameterAsFile(parameters, self.BOREHOLE_COORDINATES_FILE, context)
 
+        export_modelica = self.parameterAsBoolean(parameters, self.EXPORT_MODELICA, context)
+        topology_geojson_file = self.parameterAsFile(parameters, self.INPUT_Topology_GeoJSON, context)
+        trenches_geojson_file = self.parameterAsFile(parameters, self.INPUT_Trenches_GeoJSON, context)
+        modelica_output_folder = self.parameterAsString(parameters, self.MODELICA_OUTPUT_FOLDER, context)
+        if export_modelica and not topology_geojson_file:
+            raise QgsProcessingException(
+                "A topology GeoJSON must be provided when 'Export project to "
+                "Modelica' is checked!"
+            )
+        if export_modelica and not modelica_output_folder:
+            raise QgsProcessingException(
+                "A Modelica export folder must be provided when 'Export "
+                "project to Modelica' is checked!"
+            )
+
         # Load and validate the settings file
         feedback.pushInfo("Loading settings file...")
         try:
@@ -246,7 +474,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         # The settings file's own content determines BHE vs HHE -- no
         # separate mode dropdown, so a project can keep both a BHE and an
         # HHE settings file and this just picks whichever one was chosen.
-        he_mode = detect_mode(settings)
+        he_mode = utils.detect_mode(settings)
         if he_mode is None:
             raise QgsProcessingException(
                 "This settings file doesn't contain any role recognized as "
@@ -266,6 +494,13 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(
                 "A borehole coordinates file must be provided when the "
                 "settings file is a BHE settings file!"
+            )
+
+        if export_modelica and he_mode == "HHE" and not trenches_geojson_file:
+            raise QgsProcessingException(
+                "A trenches GeoJSON must be provided when 'Export project "
+                "to Modelica' is checked and the settings file is an HHE "
+                "settings file!"
             )
 
         brine = settings["brine"]
@@ -304,7 +539,9 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 borefield_input = read_borefield_coordinates_tsv(dat_path)
             finally:
                 os.remove(dat_path)
-            coordinates = localize_borefield_coordinates(borefield_input)
+            # QGIS-based, not pythermonet's pyproj-based version: pyproj
+            # crashes QGIS on Processing background threads (2026-10-01).
+            coordinates = _localize_borefield_coordinates_qgis(borefield_input)
 
             grout = settings["grout"]
             pipe_material_bhe = settings["pipe_material_bhe"]
@@ -331,6 +568,33 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 brine_temperature_limits=brine_temperature_limits,
             )
             print_bhe_results(result)
+
+            if export_modelica:
+                feedback.pushInfo("Writing Modelica export...")
+                topology_layer = QgsVectorLayer(topology_geojson_file, "pipe_topology", "ogr")
+                if not topology_layer.isValid():
+                    raise QgsProcessingException(
+                        f"Could not load topology GeoJSON: {topology_geojson_file}"
+                    )
+                connection_point = connection_point_in_topology_crs(
+                    borefield_file, topology_layer.crs().authid()
+                )
+                pipes = build_pipes_export(
+                    topology_geojson_file,
+                    hydraulic,
+                    brine,
+                    connection_point,
+                    topology_layer.crs().authid(),
+                    feedback,
+                )
+                boreholes = build_boreholes_export(borefield_input, coordinates, result)
+                heatpumps = build_heatpumps_export(hp_list)
+                settings_passthrough = build_settings_passthrough(settings_path)
+                write_modelica_export(
+                    modelica_temp_folder, heatpumps, pipes, settings_passthrough,
+                    boreholes=boreholes,
+                )
+                feedback.pushInfo(f"Modelica export written to {modelica_output_folder}")
         else:
             feedback.pushInfo("Performing HHE sizing...")
             pipe_material_hhe = settings["pipe_material_hhe"]
@@ -373,7 +637,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             # itself already succeeded and was reported above, so a failure
             # to persist the length shouldn't fail the whole run.
             try:
-                update_settings_fields(
+                utils.update_settings_fields(
                     settings_path,
                     {"hhe_field_parameters": {"length_element": result.sizing.length_element}},
                 )
@@ -389,8 +653,36 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
             # qthermonet_hhe_settings section naming a layer currently
             # loaded in the project. Runs after the write-back above so the
             # refreshed trenches reflect the newly-computed length, not the
-            # placement tool's earlier guess.
-            refresh_hhe_trench_layer(settings_path)
+            # placement tool's earlier guess. It edits a loaded layer, so
+            # it's done on the GUI thread in postProcessAlgorithm, not here.
+            self._refresh_trenches_for = settings_path
+
+            if export_modelica:
+                feedback.pushInfo("Writing Modelica export...")
+                topology_layer = QgsVectorLayer(topology_geojson_file, "pipe_topology", "ogr")
+                if not topology_layer.isValid():
+                    raise QgsProcessingException(
+                        f"Could not load topology GeoJSON: {topology_geojson_file}"
+                    )
+                connection_point = connection_point_in_topology_crs(
+                    trenches_geojson_file, topology_layer.crs().authid()
+                )
+                pipes = build_pipes_export(
+                    topology_geojson_file,
+                    hydraulic,
+                    brine,
+                    connection_point,
+                    topology_layer.crs().authid(),
+                    feedback,
+                )
+                trenches = build_trenches_export(trenches_geojson_file, result)
+                heatpumps = build_heatpumps_export(hp_list)
+                settings_passthrough = build_settings_passthrough(settings_path)
+                write_modelica_export(
+                    modelica_temp_folder, heatpumps, pipes, settings_passthrough,
+                    trenches=trenches,
+                )
+                feedback.pushInfo(f"Modelica export written to {modelica_output_folder}")
 
         # # Write to output file
         # feedback.pushInfo("Writing output...")
@@ -436,6 +728,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         """
         return '3. Dimensioning'
 
+
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
 
@@ -460,6 +753,13 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 "created using the 'Source Placement' tool. <p>"
                 "<p><b> Output:</b> Input parameters and results are stored in an output "
                 "report.dat file (not yet implemented). <p>"
+                "<p> Optionally, checking 'Export project to Modelica' also "
+                "writes heatpumps.json, pipes.json, a ground-field file "
+                "(boreholes.json for BHE, trenches.json for HHE) and a "
+                "settings passthrough into a chosen folder -- requires the "
+                "topology GeoJSON from the 'Pipe Topology' tool (and, for "
+                "HHE, the trenches GeoJSON from 'Source Placement') as "
+                "additional inputs. <p>"
                 "<p> <b> References: </b> <p>"
                 "<p> Erbs Poulsen, S., & Tordrup, K. (2025). An integrated design "
                 "model for ambient temperature district heating and cooling networks. "

@@ -56,7 +56,8 @@ class ToggleThermonetAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterVectorLayer(
                 self.INPUT_LAYER,
                 "Buildings layer with selected buildings",
-                [QgsProcessing.TypeVectorPolygon]
+                [QgsProcessing.TypeVectorPolygon],
+                defaultValue=utils.get_cached_path("buildings_file"),
             )
         param.setHelp(
             "Input a layer with features selected that you want to "
@@ -105,15 +106,19 @@ class ToggleThermonetAlgorithm(QgsProcessingAlgorithm):
         for feature in selected_features:
             input_layer.changeAttributeValue(feature.id(), thermonet_field_index, thermonet_value)
 
-        input_layer.triggerRepaint()  # Refresh layer to show changes
-        
+        # Save changes
+        if not input_layer.commitChanges():
+            raise QgsProcessingException("Failed to save changes to the layer. Please check for potential issues.")
+
         # Deselect all features in the layer
         if input_layer.selectedFeatureCount() > 0:
             input_layer.removeSelection()
-    
-        #Save changes
-        if not input_layer.commitChanges():
-            raise QgsProcessingException("Failed to save changes to the layer. Please check for potential issues.")
+
+        # Reload from the provider and repaint -- triggerRepaint() alone, called
+        # before commitChanges(), left the canvas showing the pre-edit render
+        # until the layer's visibility was toggled off/on by hand.
+        input_layer.reload()
+        input_layer.triggerRepaint()
         
         return {
             "Updated Features": len(selected_features)

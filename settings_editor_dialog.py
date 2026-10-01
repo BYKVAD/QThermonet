@@ -5,7 +5,7 @@ Lets a user create or edit a project's ``settings.json`` without leaving
 QGIS. Rendering is schema-agnostic (one text box per field found in the
 loaded JSON) and role-filtered (only roles from :data:`ROLES_BHE` /
 :data:`ROLES_HHE` are shown, in that order). Save writes the edited JSON via
-:func:`~QThermonet.source_placement_dialog.write_settings_json` -- the one
+:func:`~QThermonet.utils.write_settings_json` -- the one
 place in QThermonet that actually writes a settings file to disk, shared
 with Source Placement's HHE export and Full Dimensioning's computed-length
 write-back. It validates with ``pythermonet.input.load_settings`` (the real
@@ -24,21 +24,17 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from pythermonet.resources import SETTINGS_TEMPLATE_BHE_PATH, SETTINGS_TEMPLATE_HHE_PATH
-
 from . import utils
-from .source_placement_dialog import refresh_hhe_trench_layer, write_settings_json
-from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
+from .output_handling import OutputCommitError
+from .source_placement_dialog import refresh_hhe_trench_layer
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QFont, QFontMetrics
 from qgis.PyQt.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -50,7 +46,6 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -86,15 +81,6 @@ ROLES_HHE: tuple[str, ...] = (
     "pipe_material_hhe",
     "pipe_segment_hhe",
     "hhe_field_parameters",
-)
-
-# Roles that exist only in one template -- used to detect a loaded file's
-# mode without asking the user, by checking which side's unique roles it has.
-_BHE_ONLY_ROLES = frozenset(
-    {"grout", "pipe_material_bhe", "borehole", "pipe_segment_bhe", "vhe_field_parameters"}
-)
-_HHE_ONLY_ROLES = frozenset(
-    {"pipe_material_hhe", "pipe_segment_hhe", "hhe_field_parameters"}
 )
 
 # Hand-maintained, QThermonet-local display overrides for the generic
@@ -229,32 +215,32 @@ def _display_unit(unit: str) -> str:
     return _UNIT_DISPLAY_OVERRIDES.get(unit, unit)
 
 
-def detect_mode(settings: dict) -> str | None:
-    """Detect whether a settings file/dict is BHE or HHE.
+def _validate_field_value(role: str, field_name: str, value: object) -> str | None:
+    """Extra semantic checks beyond what `load_settings` covers (unit/shape only).
 
-    Public API: also used by `full_dimensioning_algorithm.py` to derive the
-    heat exchanger mode straight from the chosen settings file, instead of
-    a separate dialog dropdown.
+    `load_settings` only validates a field's unit and that every declared
+    field is present -- it never inspects a value's content, so a
+    physically-nonsensical number (e.g. an odd pipe count) would otherwise
+    save without complaint. This is the place to add such rules as they
+    come up; there is only one so far.
 
     Parameters
     ----------
-    settings : dict
-        Role name -> block, either the settings file's raw top-level JSON
-        or the `dict[str, object]` `pythermonet.input.load_settings`
-        returns -- only the key set (role names) is inspected, so either
-        shape works.
+    role : str
+        The field's role (top-level JSON key).
+    field_name : str
+        The field's name within the role.
+    value : object
+        The already-coerced value (see `_coerce_value`).
 
     Returns
     -------
     str | None
-        ``"BHE"`` or ``"HHE"`` if a mode-unique role is present, otherwise
-        `None` if the file contains neither (mode can't be determined).
+        An error message if `value` fails a known rule, else `None`.
     """
-    roles = set(settings)
-    if roles & _BHE_ONLY_ROLES:
-        return "BHE"
-    if roles & _HHE_ONLY_ROLES:
-        return "HHE"
+    if role == "hhe_field_parameters" and field_name == "n_pipes_parallel":
+        if value <= 0 or value % 2 != 0:
+            return "must be a positive even number (each U-pipe trench uses 2 parallel pipes)"
     return None
 
 
@@ -329,184 +315,6 @@ class _FieldRow:
     original_value: object
 
 
-_CARD_STYLE_UNSELECTED = (
-    "QFrame#templateCard {"
-    " border: 1.5px solid #c6c6c6; border-radius: 6px; background-color: #ffffff; }"
-)
-_CARD_STYLE_SELECTED = (
-    "QFrame#templateCard {"
-    " border: 2px solid #0067c0; border-radius: 6px; background-color: #eaf3fc; }"
-)
-
-
-def _mode_icon(mode: str) -> QPixmap:
-    """Draw the small line-art glyph for a BHE/HHE template card.
-
-    Parameters
-    ----------
-    mode : str
-        ``"BHE"`` (three vertical boreholes below a ground-surface line) or
-        ``"HHE"`` (three horizontal loops).
-
-    Returns
-    -------
-    QPixmap
-        A 26x26, transparent-background icon in the accent blue.
-    """
-    size = 26
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    accent = QColor("#0067c0")
-
-    thick_pen = QPen(accent)
-    thick_pen.setWidthF(2.0)
-    thin_pen = QPen(accent)
-    thin_pen.setWidthF(1.4)
-
-    if mode == "BHE":
-        painter.setPen(thin_pen)
-        painter.drawLine(2, 4, 24, 4)  # ground surface
-        painter.setPen(thick_pen)
-        for x in (6, 13, 20):
-            painter.drawLine(x, 4, x, 22)  # boreholes, hanging below the surface
-    else:
-        painter.setPen(thick_pen)
-        for y in (8, 14, 20):
-            painter.drawLine(4, y, 22, y)  # horizontal loops
-
-    painter.end()
-    return pixmap
-
-
-class _ClickableFrame(QFrame):
-    """A QFrame that emits `clicked` on mouse press, for card-style selection."""
-
-    clicked = pyqtSignal()
-
-    def mousePressEvent(self, event) -> None:  # noqa: D102 (Qt override, not new public API)
-        self.clicked.emit()
-        super().mousePressEvent(event)
-
-
-class _TemplateChoiceDialog(QDialog):
-    """Small modal for New: pick a BHE or HHE starting template."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("New Settings File")
-        self.mode: str = "BHE"
-        self.destination_path: str = ""
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Choose a starting template:"))
-
-        cards_row = QHBoxLayout()
-        self._bhe_radio = QRadioButton()
-        self._bhe_card = self._build_card(
-            self._bhe_radio, "BHE", "Starts from pythermonet's bundled BHE template."
-        )
-        cards_row.addWidget(self._bhe_card)
-
-        self._hhe_radio = QRadioButton()
-        self._hhe_card = self._build_card(
-            self._hhe_radio, "HHE", "Starts from pythermonet's bundled HHE template."
-        )
-        cards_row.addWidget(self._hhe_card)
-        layout.addLayout(cards_row)
-
-        # The two radios live in different cards, so they don't share a
-        # parent widget -- Qt only auto-exclusivizes radio buttons with the
-        # same parent, so without this both could end up checked at once.
-        self._mode_group = QButtonGroup(self)
-        self._mode_group.addButton(self._bhe_radio)
-        self._mode_group.addButton(self._hhe_radio)
-
-        self._bhe_radio.setChecked(True)
-        self._bhe_card.setStyleSheet(_CARD_STYLE_SELECTED)
-        self._bhe_radio.toggled.connect(lambda checked: self._restyle_card(self._bhe_card, checked))
-        self._hhe_radio.toggled.connect(lambda checked: self._restyle_card(self._hhe_card, checked))
-        self._bhe_card.clicked.connect(self._bhe_radio.click)
-        self._hhe_card.clicked.connect(self._hhe_radio.click)
-
-        note = QLabel(
-            "The chosen template is copied as-is. QThermonet does not generate "
-            "settings content itself."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #8a8a8a; font-size: 11px;")
-        layout.addWidget(note)
-
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Settings file:"))
-        self._path_display = QLineEdit()
-        self._path_display.setReadOnly(True)
-        path_row.addWidget(self._path_display)
-        browse_button = QPushButton("Browse…")
-        browse_button.clicked.connect(self._on_browse)
-        path_row.addWidget(browse_button)
-        layout.addLayout(path_row)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self._ok_button.setEnabled(False)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _on_browse(self) -> None:
-        mode = "HHE" if self._hhe_radio.isChecked() else "BHE"
-        default_name = f"settings_{mode.lower()}.json"
-        utils.warn_if_project_unsaved(self)
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save New Settings File",
-            os.path.join(utils.default_save_directory(), default_name),
-            "Settings JSON (*.json)",
-        )
-        if not path:
-            return
-        self.destination_path = path
-        self._path_display.setText(path)
-        self._ok_button.setEnabled(True)
-
-    def _build_card(self, radio: QRadioButton, mode: str, description: str) -> _ClickableFrame:
-        card = _ClickableFrame()
-        card.setObjectName("templateCard")
-        card.setStyleSheet(_CARD_STYLE_UNSELECTED)
-
-        card_layout = QVBoxLayout(card)
-        top_row = QHBoxLayout()
-        icon_label = QLabel()
-        icon_label.setPixmap(_mode_icon(mode))
-        top_row.addWidget(icon_label)
-        top_row.addStretch(1)
-        top_row.addWidget(radio)
-        card_layout.addLayout(top_row)
-
-        title = QLabel("Borehole (BHE)" if mode == "BHE" else "Horizontal (HHE)")
-        title.setStyleSheet("font-weight: 600; font-size: 13px;")
-        card_layout.addWidget(title)
-
-        desc_label = QLabel(description)
-        desc_label.setWordWrap(True)
-        desc_label.setStyleSheet("color: #5f5f5f; font-size: 11px;")
-        card_layout.addWidget(desc_label)
-
-        return card
-
-    def _restyle_card(self, card: _ClickableFrame, selected: bool) -> None:
-        card.setStyleSheet(_CARD_STYLE_SELECTED if selected else _CARD_STYLE_UNSELECTED)
-
-    def accept(self) -> None:  # noqa: D102 (Qt override, not new public API)
-        self.mode = "HHE" if self._hhe_radio.isChecked() else "BHE"
-        super().accept()
-
-
 class SettingsEditorDialog(QDialog):
     """Window for creating/editing a QThermonet project's settings file.
 
@@ -521,7 +329,9 @@ class SettingsEditorDialog(QDialog):
     parent : QWidget | None
         Parent widget, typically the QGIS main window.
     initial_path : str | None
-        Settings file to load immediately, if any.
+        Settings file to load immediately. Defaults to the most recently
+        opened/created settings file this QGIS session
+        (:func:`~QThermonet.utils.get_current_settings_path`), if any.
 
     Attributes
     ----------
@@ -541,6 +351,8 @@ class SettingsEditorDialog(QDialog):
         self._role_boxes: dict[str, QGroupBox] = {}
 
         self._build_ui()
+        if initial_path is None:
+            initial_path = utils.get_current_settings_path()
         if initial_path:
             self._load_file(initial_path)
 
@@ -557,9 +369,6 @@ class SettingsEditorDialog(QDialog):
         browse_button = QPushButton("Browse…")
         browse_button.clicked.connect(self._on_browse)
         header.addWidget(browse_button)
-        new_button = QPushButton("New…")
-        new_button.clicked.connect(self._on_new)
-        header.addWidget(new_button)
         outer.addLayout(header)
 
         self._mode_label = QLabel("No settings file loaded.")
@@ -631,7 +440,7 @@ class SettingsEditorDialog(QDialog):
             QMessageBox.critical(self, "Can't open settings file", str(exc))
             return
 
-        mode = detect_mode(raw)
+        mode = utils.detect_mode(raw)
         if mode is None:
             QMessageBox.critical(
                 self,
@@ -651,6 +460,7 @@ class SettingsEditorDialog(QDialog):
         )
         self._set_status("Ready.")
         self._rebuild_sections()
+        utils.load_existing_settings_path(path)
 
     def _roles_for_mode(self) -> tuple[str, ...]:
         return ROLES_BHE if self._mode == "BHE" else ROLES_HHE
@@ -776,44 +586,28 @@ class SettingsEditorDialog(QDialog):
         if path:
             self._load_file(path)
 
-    def _on_new(self) -> None:
-        choice = _TemplateChoiceDialog(self)
-        if choice.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        template_path = (
-            SETTINGS_TEMPLATE_BHE_PATH if choice.mode == "BHE" else SETTINGS_TEMPLATE_HHE_PATH
-        )
-        try:
-            shutil.copyfile(template_path, choice.destination_path)
-        except OSError as exc:
-            QMessageBox.critical(self, "Can't create settings file", str(exc))
-            return
-
-        self._load_file(choice.destination_path)
-
     def _on_save(self) -> None:
         if self.path is None:
             QMessageBox.warning(
-                self, "Nothing to save", "Use Browse or New to load a settings file first."
+                self, "Nothing to save", "Use Browse to load a settings file first."
             )
             return
 
         updated_raw = copy.deepcopy(self._raw)
-        parse_failure = self._apply_edits(updated_raw)
-        if parse_failure is not None:
-            role, field_name, message = parse_failure
+        field_problem = self._apply_edits(updated_raw)
+        if field_problem is not None:
+            role, field_name, message = field_problem
             self._clear_error_highlight()
             self._highlight_field(role, field_name)
             self._show_error(
                 f"Can't save — {role}.{field_name}: {message}",
                 guidance=None,
-                status="Save failed — couldn't parse an edited value.",
+                status="Save failed — an edited value isn't valid.",
             )
             return
 
         try:
-            write_settings_json(self.path, updated_raw)
+            utils.write_settings_json(self.path, updated_raw)
         except ValueError as exc:
             self._handle_validation_failure(str(exc))
             return
@@ -831,7 +625,14 @@ class SettingsEditorDialog(QDialog):
         # exported HHE trench layer -- see refresh_hhe_trench_layer()'s own
         # docstring. A no-op unless this file has a qthermonet_hhe_settings
         # section naming a layer currently loaded in the project.
-        refresh_hhe_trench_layer(str(self.path))
+        try:
+            refresh_hhe_trench_layer(str(self.path))
+        except OutputCommitError as exc:
+            QMessageBox.warning(
+                self,
+                "Trench layer not refreshed",
+                f"The settings file was saved, but the HHE trench layer couldn't be updated:\n\n{exc}",
+            )
 
     def _apply_edits(self, updated_raw: dict) -> tuple[str, str, str] | None:
         """Write every field row's current text back into `updated_raw`.
@@ -845,13 +646,17 @@ class SettingsEditorDialog(QDialog):
         -------
         tuple[str, str, str] | None
             `(role, field_name, message)` for the first field that can't be
-            parsed back to its original type, or `None` if all succeeded.
+            parsed back to its original type, or that fails a semantic rule
+            (see :func:`_validate_field_value`), or `None` if all succeeded.
         """
         for row in self._field_rows:
             try:
                 value = _coerce_value(row.editor.text(), row.original_value)
             except ValueError as exc:
                 return row.role, row.field_name, str(exc)
+            problem = _validate_field_value(row.role, row.field_name, value)
+            if problem is not None:
+                return row.role, row.field_name, problem
             updated_raw[row.role]["values"][row.field_name]["value"] = value
         return None
 

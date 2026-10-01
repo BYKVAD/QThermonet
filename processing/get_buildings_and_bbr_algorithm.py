@@ -36,7 +36,7 @@ from urllib.parse import quote
 from osgeo import gdal
 
 import requests as rq
-from .. import utils
+from .. import output_handling, utils
 from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (
@@ -67,6 +67,44 @@ from qgis.core import (
     )
 
 
+def style_buildings(layer):
+    """Apply the default buildings styling (red = in the thermonet, grey = not).
+
+    Parameters
+    ----------
+    layer : QgsVectorLayer
+        A freshly loaded buildings layer with a 'Thermonet' field.
+
+    """
+    categories = []
+
+    gray_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    gray_symbol.setColor(QColor(200, 200, 200))
+    categories.append(QgsRendererCategory("No", gray_symbol, "No"))
+
+    red_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    red_symbol.setColor(QColor(196, 60, 57))
+    categories.append(QgsRendererCategory("Yes", red_symbol, "Yes"))
+
+    layer.setRenderer(QgsCategorizedSymbolRenderer("Thermonet", categories))
+
+
+def style_roads(layer):
+    """Apply the default roads styling (plain black lines).
+
+    Parameters
+    ----------
+    layer : QgsVectorLayer
+        A freshly loaded roads layer.
+
+    """
+    line_symbol = QgsLineSymbol.createSimple({
+        'color': 'black',
+        'width': '1.1',
+    })
+    layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
+
+
 class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
 
     #Handle input/output
@@ -80,7 +118,8 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFeatureSource(
                 self.INPUT_AREA,
                 "AOI (a single polygon)",
-                [QgsProcessing.TypeVectorPolygon]  # Only accept polygon layers
+                [QgsProcessing.TypeVectorPolygon],  # Only accept polygon layers
+                defaultValue=utils.get_cached_path("aoi_file")
             )
         param.setHelp(
             "The input layer must:\n"
@@ -114,19 +153,38 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(param_roads)
 
-        self.addParameter(
-            QgsProcessingParameterBoolean(
-                "OPEN_OUTPUT",
-                self.tr("Add output files to QGIS after running algorithm"),
-                defaultValue=True  # Automatically checked
-            )
-        )
+    def prepareAlgorithm(self, parameters, context, feedback):
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.INPUT_AREA):
+            return False
+        paths = [self.parameterAsFileOutput(parameters, self.OUTPUT_BUILD, context)]
+        output_roads_path = self.parameterAsFileOutput(parameters, self.OUTPUT_ROADS, context)
+        if output_roads_path and output_roads_path != 'TEMPORARY_OUTPUT':
+            paths.append(output_roads_path)
+        if not output_handling.confirm_overwrite(paths):
+            feedback.reportError("Cancelled -- no files were changed.")
+            return False
+        return True
 
     def processAlgorithm(self, parameters, context, feedback):
+        self._outputs = output_handling.OutputSet()
+        try:
+            result = self._run(parameters, context, feedback)
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return result
+
+    def postProcessAlgorithm(self, context, feedback):
+        self._outputs.commit(feedback)
+        return {}
+
+    def _run(self, parameters, context, feedback):
+        """Fetch buildings (+ optional roads) and write them to temp files via `self._outputs`."""
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_BUILD, context)
         output_roads_path = self.parameterAsFileOutput(parameters, self.OUTPUT_ROADS, context)
-        open_output = self.parameterAsBoolean(parameters, "OPEN_OUTPUT", context)
 
         try:
             api_key = utils.read_datafordeler_api_key()
@@ -140,7 +198,8 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException("Invalid input layer!")
 
         if input_area_layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            raise QgsProcessingException("The input layer must be a polygon layer!")  
+            raise QgsProcessingException("The input layer must be a polygon layer!")
+
         features = list(input_area_layer.getFeatures())  # Check the feature count
 
         if len(features) != 1:
@@ -154,6 +213,9 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         if not feature.geometry().isGeosValid():
             raise QgsProcessingException("The input feature geometry has errors!")
 
+        if input_area_layer.source():
+            utils.set_cached_path("aoi_file", input_area_layer.source())
+
         # Common WFS settings
         wfs_base_url = "https://wfs.datafordeler.dk/GEODKV/GEODKV_WFS/1.0.0/WFS"
         service = "WFS"
@@ -165,7 +227,14 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         epsg = 25832  #crs code
         srsname = f"urn:ogc:def:crs:EPSG::{epsg}"
         target_crs_wfs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}")
-        output_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        # Write output in the project's recommended CRS, not a hardcoded
+        # geographic one -- this file is a working input for other
+        # QThermonet tools (e.g. service_pipes_algorithm.py's nearest-point
+        # calculation), not a portable deliverable, so RFC7946 GeoJSON
+        # convention (always WGS84) matters less here than every downstream
+        # consumer being able to trust a consistent, metric CRS without
+        # having to reproject it themselves.
+        output_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
 
         # --------------------------------------------------
         # STEP 1: BUILDINGS
@@ -209,7 +278,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             source_crs = buildings_layer.crs()
             transform = QgsCoordinateTransform(source_crs, output_crs, QgsProject.instance())
 
-            transformed_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "Buildings_4326", "memory")
+            transformed_layer = QgsVectorLayer(f"Polygon?crs={output_crs.authid()}", "Buildings_projected", "memory")
             transformed_provider = transformed_layer.dataProvider()
             transformed_provider.addAttributes(buildings_layer.fields())
             transformed_layer.updateFields()
@@ -280,43 +349,26 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         save_options.driverName = "GeoJSON"
         save_options.fileEncoding = "UTF-8"
 
+        # Written to a temp file; swapped in, loaded and styled after the
+        # run succeeds (postProcessAlgorithm).
+        buildings_temp_path = self._outputs.add_file(
+            output_path,
+            layer_name="Buildings",
+            cache_roles=["buildings_file"],
+            style_default=style_buildings,
+        )
         error = QgsVectorFileWriter.writeAsVectorFormatV3(
             transformed_layer,
-            output_path,
+            buildings_temp_path,
             context.transformContext(),
             save_options
         )
 
         error_code = error[0] if isinstance(error, tuple) else error
         if error_code == QgsVectorFileWriter.NoError:
-            feedback.pushInfo(f"Layer successfully exported to {output_path}")
+            feedback.pushInfo(f"Buildings layer written (will be saved to {output_path})")
         else:
             raise QgsProcessingException(f"Failed to export buildings layer. Error: {error}")
-
-        if open_output:
-            feedback.pushInfo("Opening building output file...")
-            buildings_output_name = os.path.splitext(os.path.basename(output_path))[0]
-            out_buildings_layer = QgsVectorLayer(output_path, buildings_output_name, "ogr")
-
-            if not out_buildings_layer.isValid():
-                raise QgsProcessingException("Could not load the building output layer!")
-
-            QgsProject.instance().addMapLayer(out_buildings_layer)
-
-            feedback.pushInfo("Applying symbology...")
-            categories = []
-
-            gray_symbol = QgsSymbol.defaultSymbol(out_buildings_layer.geometryType())
-            gray_symbol.setColor(QColor(200, 200, 200))
-            categories.append(QgsRendererCategory("No", gray_symbol, "No"))
-
-            red_symbol = QgsSymbol.defaultSymbol(out_buildings_layer.geometryType())
-            red_symbol.setColor(QColor(196, 60, 57))
-            categories.append(QgsRendererCategory("Yes", red_symbol, "Yes"))
-
-            renderer = QgsCategorizedSymbolRenderer("Thermonet", categories)
-            out_buildings_layer.setRenderer(renderer)
-            out_buildings_layer.triggerRepaint()
 
         # --------------------------------------------------
         # STEP 5: OPTIONAL ROADS
@@ -358,7 +410,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                     source_crs = roads_layer.crs()
                     transform = QgsCoordinateTransform(source_crs, output_crs, QgsProject.instance())
 
-                    transformed_roads_layer = QgsVectorLayer("MultiLineString?crs=EPSG:4326", "Roads_4326", "memory")
+                    transformed_roads_layer = QgsVectorLayer(f"MultiLineString?crs={output_crs.authid()}", "Roads_projected", "memory")
                     transformed_roads_provider = transformed_roads_layer.dataProvider()
                     transformed_roads_provider.addAttributes(roads_layer.fields())
                     transformed_roads_layer.updateFields()
@@ -442,40 +494,33 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                             save_options.driverName = "GeoJSON"
                             save_options.fileEncoding = "UTF-8"
 
+                            roads_temp_path = self._outputs.add_file(
+                                output_roads_path,
+                                layer_name="Roads",
+                                cache_roles=["roads_file"],
+                                style_default=style_roads,
+                            )
                             error = QgsVectorFileWriter.writeAsVectorFormatV3(
                                 new_roads_layer,
-                                output_roads_path,
+                                roads_temp_path,
                                 context.transformContext(),
                                 save_options
                             )
 
                             error_code = error[0] if isinstance(error, tuple) else error
                             if error_code == QgsVectorFileWriter.NoError:
-                                feedback.pushInfo(f"Layer successfully exported to {output_roads_path}")
+                                feedback.pushInfo(f"Roads layer written (will be saved to {output_roads_path})")
                                 roads_created = True
                             else:
+                                self._outputs.drop(output_roads_path)
                                 feedback.pushInfo(f"Failed to export the roads layer. Error: {error}")
 
             except Exception as e:
+                # Roads are optional: drop any half-written roads output but
+                # keep the buildings, which are complete by now.
+                self._outputs.drop(output_roads_path)
                 feedback.pushInfo(f"Road processing failed: {str(e).replace(api_key, '<REDACTED>')}")
                 feedback.pushInfo("Building output is still completed successfully.")
-
-            # Open road layer only if it was actually created
-            if open_output and roads_created and os.path.exists(output_roads_path):
-                feedback.pushInfo("Opening roads output file...")
-                roads_output_name = os.path.splitext(os.path.basename(output_roads_path))[0]
-                out_roads_layer = QgsVectorLayer(output_roads_path, roads_output_name, "ogr")
-
-                if out_roads_layer.isValid():
-                    QgsProject.instance().addMapLayer(out_roads_layer)
-                    line_symbol = QgsLineSymbol.createSimple({
-                        'color': 'black',
-                        'width': '1.1',
-                    })
-                    out_roads_layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
-                    out_roads_layer.triggerRepaint()
-                else:
-                    feedback.pushInfo("Road output file exists, but QGIS could not load it.")
 
         feedback.pushInfo("Processing completed successfully.")
 

@@ -6,6 +6,10 @@ Contains functions that should be reachable from any processing algorithm
 """
 
 # utils.py
+import json
+import os
+from pathlib import Path
+
 import requests as rq
 
 def fetch_api_data(X, Y):
@@ -101,13 +105,18 @@ def calculate_tc(X, Y, depth):
 def get_representative_point(input_layer):
     """
     Extract a representative point from a vector layer in EPSG:25832.
-    - Polygon: centroid
-    - Line: midpoint
-    - Point: point coordinates
-    
+
+    Combines every feature's geometry (`QgsGeometry.unaryUnion`) and takes the
+    centroid of the result -- for a single polygon this is just its centroid
+    (unchanged from before), but it also handles a multi-feature source layer
+    (a BHE borefield's many points, or an HHE field's many trench lines)
+    without requiring exactly one feature: a point cloud's centroid is the
+    plain average of its points, and a multi-line centroid is length-weighted
+    along the lines, both reasonable definitions of "the middle of the field."
+
     Returns (x, y) tuple in EPSG:25832 or raises an exception if input is invalid.
     """
-    from qgis.core import (QgsVectorLayer, QgsWkbTypes, QgsCoordinateReferenceSystem,
+    from qgis.core import (QgsGeometry, QgsVectorLayer, QgsWkbTypes, QgsCoordinateReferenceSystem,
                            QgsCoordinateTransform, QgsProject)
 
     if not input_layer or not isinstance(input_layer, QgsVectorLayer):
@@ -120,35 +129,28 @@ def get_representative_point(input_layer):
     ]:
         raise ValueError("Input layer must be a polygon, point or line!")
 
-    features = list(input_layer.getFeatures())
-    if len(features) != 1:
-        raise ValueError("Input layer must contain exactly one feature!")
+    geometries = [
+        feature.geometry()
+        for feature in input_layer.getFeatures()
+        if feature.isValid() and not feature.geometry().isEmpty()
+    ]
+    if not geometries:
+        raise ValueError("Input layer has no features with valid geometry!")
 
-    feature = features[0]
-    if not feature.isValid() or feature.geometry().isEmpty():
-        raise ValueError("Input feature contains invalid or empty geometry!")
+    combined = QgsGeometry.unaryUnion(geometries)
 
     # Reproject to EPSG:25832 if needed
-    geometry   = feature.geometry()
     source_crs = input_layer.crs()
     target_crs = QgsCoordinateReferenceSystem("EPSG:25832")
 
     if source_crs != target_crs:
         transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
-        geometry.transform(transform)
+        combined.transform(transform)
 
-    # Extract representative point based on geometry type
-    geom_type = input_layer.geometryType()
-
-    if geom_type == QgsWkbTypes.PolygonGeometry:
-        point = geometry.centroid().asPoint()
-    elif geom_type == QgsWkbTypes.PointGeometry:
-        point = geometry.asPoint()
-    elif geom_type == QgsWkbTypes.LineGeometry:
-        point = geometry.interpolate(geometry.length() / 2).asPoint()
+    point = combined.centroid().asPoint()
 
     return round(point.x()), round(point.y())
-from pathlib import Path
+
 
 PLUGIN_ROOT = Path(__file__).parent
 RESOURCES_DIR = PLUGIN_ROOT / "resources"
@@ -184,6 +186,322 @@ def get_logo(filename: str) -> str:
         Absolute filesystem path to the icon.
     """
     return get_resource(f"logos/{filename}")
+
+
+#: Roles that exist only in one settings-file template -- used to detect a
+#: loaded file's mode without asking the user, by checking which side's
+#: unique roles it has.
+_BHE_ONLY_ROLES = frozenset(
+    {"grout", "pipe_material_bhe", "borehole", "pipe_segment_bhe", "vhe_field_parameters"}
+)
+_HHE_ONLY_ROLES = frozenset(
+    {"pipe_material_hhe", "pipe_segment_hhe", "hhe_field_parameters"}
+)
+
+
+def detect_mode(settings: dict) -> str | None:
+    """Detect whether a settings file/dict is BHE or HHE.
+
+    Shared by the Dimensioning Settings dialog, Source Placement, and
+    `full_dimensioning_algorithm.py`, so a settings file's mode is always
+    derived the same way instead of asked for separately in each place.
+
+    Parameters
+    ----------
+    settings : dict
+        Role name -> block, either the settings file's raw top-level JSON
+        or the `dict[str, object]` `pythermonet.input.load_settings`
+        returns -- only the key set (role names) is inspected, so either
+        shape works.
+
+    Returns
+    -------
+    str | None
+        ``"BHE"`` or ``"HHE"`` if a mode-unique role is present, otherwise
+        `None` if the file contains neither (mode can't be determined).
+    """
+    roles = set(settings)
+    if roles & _BHE_ONLY_ROLES:
+        return "BHE"
+    if roles & _HHE_ONLY_ROLES:
+        return "HHE"
+    return None
+
+
+def write_settings_json(path: str | Path, raw: dict) -> None:
+    """Validate and atomically write a settings file's raw JSON.
+
+    The one place in QThermonet that actually writes a settings file to
+    disk: `SettingsEditorDialog._on_save`, Source Placement's HHE export,
+    Full Dimensioning's computed-length write-back, and the file-path cache
+    below all go through this (directly, or via
+    :func:`update_settings_fields`). Writes `raw` to a temp file, validates
+    it with `pythermonet.input.load_settings` (the real file is never
+    touched if invalid), then atomically replaces `path`. Deliberately
+    never goes through `pythermonet.output.save_settings` (which
+    reconstructs the file purely from typed domain objects and would
+    silently drop anything -- like QThermonet's reserved `qthermonet_`-
+    prefixed sections -- not represented in them); writing raw JSON directly
+    naturally carries forward everything this call doesn't explicitly touch.
+
+    Parameters
+    ----------
+    path : str
+        Settings file path.
+    raw : dict
+        The complete settings JSON to write.
+
+    Raises
+    ------
+    ValueError
+        If `raw` doesn't validate against pythermonet's schema. The real
+        file is left untouched.
+    """
+    from pythermonet.input import load_settings
+
+    p = Path(path)
+    temp_path = p.with_suffix(p.suffix + ".tmp")
+    temp_path.write_bytes((json.dumps(raw, indent=2) + "\n").encode("utf-8"))
+    try:
+        load_settings(temp_path)
+    except ValueError:
+        os.remove(temp_path)
+        raise
+    os.replace(temp_path, p)
+
+
+def update_settings_fields(path: str, updates: dict[str, dict[str, object]]) -> None:
+    """Update specific field values in a settings file, leaving everything else untouched.
+
+    Parameters
+    ----------
+    path : str
+        Settings file path.
+    updates : dict of str to dict of str to object
+        `{role: {field_name: new_value}}` -- only these fields change; every
+        other role/field, and any `qthermonet_`-prefixed section, is
+        carried forward unchanged.
+
+    Raises
+    ------
+    ValueError
+        Propagated from :func:`write_settings_json` if the result doesn't
+        validate.
+    """
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    for role, fields in updates.items():
+        for field_name, value in fields.items():
+            raw[role]["values"][field_name]["value"] = value
+    write_settings_json(path, raw)
+
+
+#: The reserved settings-file key holding QThermonet's cross-tool file-path
+#: cache -- see the module docstring section below for the full schema and
+#: the read/write rules around it.
+_QTHERMONET_CACHE_KEY = "qthermonet_cache"
+
+
+def _read_qthermonet_cache(path: str) -> dict[str, str]:
+    """Read a settings file's `qthermonet_cache` section, if any.
+
+    Parameters
+    ----------
+    path : str
+        Settings file path.
+
+    Returns
+    -------
+    dict of str to str
+        `{role: path}`, or `{}` if the file can't be read/parsed or has no
+        cache section yet.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    cache = raw.get(_QTHERMONET_CACHE_KEY)
+    return dict(cache) if isinstance(cache, dict) else {}
+
+
+def _write_qthermonet_cache(path: str, updates: dict[str, str]) -> None:
+    """Merge `updates` into a settings file's `qthermonet_cache` section.
+
+    Additive: only the given roles change, every other role already cached
+    (and everything else in the file) is left as-is.
+
+    Parameters
+    ----------
+    path : str
+        Settings file path.
+    updates : dict of str to str
+        `{role: path}` entries to merge in.
+    """
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    cache = raw.get(_QTHERMONET_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+    cache.update(updates)
+    raw[_QTHERMONET_CACHE_KEY] = cache
+    write_settings_json(path, raw)
+
+
+def _current_project_key() -> str:
+    """A stable key for the current QGIS project, for the session cache below."""
+    from qgis.core import QgsProject
+
+    return QgsProject.instance().fileName()
+
+
+#: Per-project, in-memory, session-lifetime cache -- reset on plugin
+#: reload/QGIS restart, never persisted directly. Each project's slot is
+#: `{"settings_path": str | None, "pending": dict[str, str],
+#: "setup_asked": bool, "crs_choice": str}`:
+#:
+#: - `settings_path` is the settings file currently active for that
+#:   project, or `None` if none has been opened/created yet this session.
+#: - `pending` holds `{role: path}` entries for files produced *before* a
+#:   settings file exists to hold them (e.g. the AOI layer used by "Get
+#:   Buildings and BBR", which runs before any settings file is involved).
+#:   Once a settings file becomes active, its `qthermonet_cache` section
+#:   (see `_read_qthermonet_cache`/`_write_qthermonet_cache`) is the sole
+#:   source of truth for every role, and `pending` is cleared -- there is
+#:   deliberately no in-memory mirror of settings-file-backed roles, so
+#:   there is nothing to go stale or need clearing when the active settings
+#:   file changes.
+#: - `setup_asked`/`crs_choice`: see `maybe_prompt_project_setup` below --
+#:   deliberately session-cached, not settings-file-backed, since which CRS
+#:   to reproject into is a per-session QGIS/UX decision, not a physical
+#:   property of the thermonet design itself.
+#: - `overwrite_confirm_off`: see `overwrite_confirm_disabled` below.
+_session_cache: dict[str, dict] = {}
+
+
+def _project_slot() -> dict:
+    return _session_cache.setdefault(_current_project_key(), {"settings_path": None, "pending": {}})
+
+
+def get_current_settings_path() -> str | None:
+    """The settings file currently active for the current QGIS project.
+
+    Returns
+    -------
+    str | None
+        The path, or `None` if no settings file has been opened/created yet
+        this session for this project.
+    """
+    return _project_slot()["settings_path"]
+
+
+def load_existing_settings_path(path: str) -> None:
+    """Register `path` as the active settings file, having just been opened.
+
+    If this is the first settings file opened/created this session for the
+    current project, any `pending` entries (files produced before a
+    settings file existed) are merged into `path`'s `qthermonet_cache` --
+    `pending` overwrites matching roles already in the file, since the
+    session's data is fresher -- and then cleared. If a settings file was
+    already active, this just repoints to `path`; there is no other
+    session-side state to reconcile (see `_session_cache`'s docstring).
+
+    Parameters
+    ----------
+    path : str
+        The settings file that was just opened.
+    """
+    slot = _project_slot()
+    if slot["settings_path"] is None and slot["pending"]:
+        try:
+            merged = {**_read_qthermonet_cache(path), **slot["pending"]}
+            _write_qthermonet_cache(path, merged)
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass  # Best-effort: leave `pending` intact so a later attempt can retry.
+        else:
+            slot["pending"] = {}
+    slot["settings_path"] = path
+
+
+def create_new_settings_path(path: str) -> None:
+    """Register `path` as the active settings file, having just been created.
+
+    Carries the "current cache" forward into the new file: the previously
+    active settings file's own `qthermonet_cache` (read fresh from disk) if
+    one was active, otherwise `pending`. This is why creating a new
+    settings file (e.g. a BHE/HHE variant of the same project) inherits
+    already-known file paths, while opening a genuinely different existing
+    settings file (:func:`load_existing_settings_path`) does not.
+
+    Parameters
+    ----------
+    path : str
+        The newly created settings file.
+    """
+    slot = _project_slot()
+    previous_path = slot["settings_path"]
+    carry_forward = _read_qthermonet_cache(previous_path) if previous_path else dict(slot["pending"])
+    if carry_forward:
+        try:
+            _write_qthermonet_cache(path, carry_forward)
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass  # Best-effort: leave `pending` intact so a later attempt can retry.
+        else:
+            slot["pending"] = {}
+    else:
+        slot["pending"] = {}
+    slot["settings_path"] = path
+
+
+def get_cached_path(role: str) -> str | None:
+    """The most recently cached path for `role`, for the current project.
+
+    Never falls back between sources: if a settings file is active, only
+    its `qthermonet_cache` is consulted (a role missing there means "not
+    cached," not "check `pending` instead") -- otherwise only `pending` is
+    consulted. Mixing the two could resurrect a stale path from a different
+    point in time.
+
+    Parameters
+    ----------
+    role : str
+        Cache key, e.g. `"borefield_file"`.
+
+    Returns
+    -------
+    str | None
+        The cached path, or `None` if nothing is cached for `role` yet.
+    """
+    slot = _project_slot()
+    if slot["settings_path"] is not None:
+        return _read_qthermonet_cache(slot["settings_path"]).get(role)
+    return slot["pending"].get(role)
+
+
+def set_cached_path(role: str, path: str) -> None:
+    """Remember `path` under `role`, for the current project.
+
+    Written straight into the active settings file's `qthermonet_cache` if
+    one exists, otherwise staged in `pending` until one does. Failures
+    (e.g. the active settings file was deleted mid-session) are swallowed
+    -- this is best-effort bookkeeping and must never break the calling
+    tool's actual output.
+
+    Parameters
+    ----------
+    role : str
+        Cache key, e.g. `"borefield_file"`.
+    path : str
+        The path to remember.
+    """
+    slot = _project_slot()
+    if slot["settings_path"] is not None:
+        try:
+            _write_qthermonet_cache(slot["settings_path"], {role: path})
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+    else:
+        slot["pending"][role] = path
 
 
 def read_datafordeler_api_key() -> str:
@@ -270,3 +588,364 @@ def warn_if_project_unsaved(parent) -> None:
         "This QGIS project hasn't been saved yet, so the file dialog won't "
         "default to the project's folder. Consider saving the project first.",
     )
+
+
+#: Rough bounding boxes in WGS84 lon/lat -- a quick sanity check, not an
+#: authoritative administrative-boundary lookup. Bornholm sits east of
+#: mainland Denmark's UTM zone (32N) and needs its own zone (33N), so it
+#: gets its own, tighter box checked first.
+_BORNHOLM_BBOX_WGS84 = (14.6, 54.9, 15.3, 55.35)   # (min_lon, min_lat, max_lon, max_lat)
+_DENMARK_MAINLAND_BBOX_WGS84 = (8.0, 54.5, 13.0, 57.8)
+
+
+def _suggest_danish_crs(point_wgs84) -> tuple[str, str] | None:
+    """`(epsg_authid, region_label)` if `point_wgs84` falls in Denmark or
+    Bornholm's rough bounding box, else `None`.
+
+    Parameters
+    ----------
+    point_wgs84 : QgsPointXY
+        A point already in WGS84 (EPSG:4326) lon/lat.
+
+    Returns
+    -------
+    tuple of (str, str) or None
+        `("EPSG:25832", "Denmark")`, `("EPSG:25833", "Bornholm")`, or
+        `None` if outside both boxes.
+    """
+    lon, lat = point_wgs84.x(), point_wgs84.y()
+    if _BORNHOLM_BBOX_WGS84[0] <= lon <= _BORNHOLM_BBOX_WGS84[2] and _BORNHOLM_BBOX_WGS84[1] <= lat <= _BORNHOLM_BBOX_WGS84[3]:
+        return "EPSG:25833", "Bornholm"
+    if _DENMARK_MAINLAND_BBOX_WGS84[0] <= lon <= _DENMARK_MAINLAND_BBOX_WGS84[2] and _DENMARK_MAINLAND_BBOX_WGS84[1] <= lat <= _DENMARK_MAINLAND_BBOX_WGS84[3]:
+        return "EPSG:25832", "Denmark"
+    return None
+
+
+def maybe_prompt_project_setup(parent, crs=None, point=None, feedback=None) -> bool:
+    """Once per project session: prompt to save an unsaved project, and
+    suggest a recommended Denmark/Bornholm CRS based on a representative point.
+
+    Fires at most once per project (session-cached via `setup_asked`) --
+    call this unconditionally at the top of any routine that takes
+    coordinate input; it no-ops immediately on every call after the first
+    for a given project. Deliberately session-cached rather than persisted
+    to the settings file -- see the module-level `_session_cache` docstring.
+
+    Two independent prompts, in order:
+
+    1. If the project has never been saved (`default_save_directory()` is
+       empty), an active "Save Now" button (triggers QGIS's own Save-As
+       action) vs. "Continue Without Saving" -- a passive nudge like
+       `warn_if_project_unsaved` risks being overlooked, and this project
+       needing a stable file is what makes the CRS choice below (and the
+       rest of the session cache) actually persist for the project's
+       lifetime rather than colliding with every other unsaved project.
+    2. If `point` (in `crs`) falls in Denmark or Bornholm's rough bounding
+       box, asks whether to use the recommended UTM zone for reprojections
+       in QThermonet (`project_crs_choice()` reads the answer back).
+       Declining, being outside both boxes, or passing no `crs`/`point`
+       leaves the existing `EPSG:3857` fallback in place -- this never
+       changes any algorithm's behavior by itself, it only records a
+       preference for `project_crs_choice()` to be read later.
+
+    Both prompts require a GUI (skipped entirely, falling back to
+    `EPSG:3857`, when `qgis.utils.iface` is `None` -- e.g. running headless
+    via `qgis_process`) -- detection is a nicety, never something that
+    should block or fail an algorithm run.
+
+    Parameters
+    ----------
+    parent : QWidget or None
+        Parent widget for the message boxes. Processing algorithms don't
+        have a natural widget parent to pass -- `None` is fine, the dialogs
+        still show, just unparented.
+    crs : QgsCoordinateReferenceSystem or None
+        The CRS `point` is expressed in -- typically an already-validated
+        input layer's `.crs()`, or a map canvas's `destinationCrs()` for a
+        picked point rather than a layer. `None` (with `point` also `None`)
+        skips the CRS suggestion but still runs the unsaved-project check.
+    point : QgsPointXY or None
+        A representative point for the project's data, in `crs` --
+        typically a layer's `.extent().center()`, or a directly picked
+        point (e.g. Source Placement's connection node). Required together
+        with `crs`; either alone is treated as "not given."
+    feedback : QgsProcessingFeedback or None
+        If given, used to explain why the prompts were skipped when running
+        headless. Purely informational.
+
+    Returns
+    -------
+    bool
+        `True` if the project was just saved for the first time during this
+        call (via "Save Now"). A caller running as part of a
+        `QgsProcessingAlgorithm` should treat this as "the parameter values
+        already resolved for this run (e.g. an output path defaulted from
+        the project's folder) were captured before the project had a
+        location, and are now stale" -- see `prepare_algorithm_project_setup`,
+        which uses this to abort the run and ask the user to re-open the
+        tool rather than silently proceeding with outdated defaults.
+
+    """
+    slot = _project_slot()
+    if slot.get("setup_asked"):
+        return False
+    slot["setup_asked"] = True
+
+    from qgis.utils import iface as _iface
+
+    if _iface is None:
+        if feedback is not None:
+            feedback.pushInfo(
+                "Running headless -- skipping the project-save/coordinate-system prompts."
+            )
+        return False
+
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    just_saved = False
+    if not default_save_directory():
+        box = QMessageBox(parent)
+        box.setWindowTitle("Project not saved")
+        box.setText(
+            "This QGIS project hasn't been saved yet. Some QThermonet "
+            "helper/pathing functionality (default file-save locations, "
+            "remembering paths between tools, and which coordinate system "
+            "to use) only works once the project has a file, and may not "
+            "behave as expected until then. Save it now?"
+        )
+        save_button = box.addButton("Save Now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Continue Without Saving", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is save_button:
+            _iface.actionSaveProjectAs().trigger()
+            just_saved = bool(default_save_directory())
+            # Saving just changed the project's filename, which is the
+            # session cache's key (see _current_project_key) -- re-fetch so
+            # the writes below land in the now-current, stable slot instead
+            # of the old, now-orphaned empty-filename one. But re-fetching
+            # alone isn't enough: anything already cached this session under
+            # the old (empty-filename) slot -- pending file paths from
+            # earlier tool runs (get_cached_path/set_cached_path), or an
+            # already-open settings file -- would otherwise be silently
+            # forgotten, since a new key starts as a brand-new empty slot.
+            # Migrate it forward. If the save was cancelled (project still
+            # unsaved), the key hasn't actually changed and this is a no-op
+            # (same slot object, nothing to migrate).
+            old_slot = slot
+            slot = _project_slot()
+            if slot is not old_slot:
+                slot["pending"] = {**old_slot.get("pending", {}), **slot.get("pending", {})}
+                if slot.get("settings_path") is None and old_slot.get("settings_path") is not None:
+                    slot["settings_path"] = old_slot["settings_path"]
+            slot["setup_asked"] = True
+
+    slot.setdefault("crs_choice", "EPSG:3857")
+
+    if crs is None or point is None:
+        return just_saved
+
+    from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
+
+    wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+    transform = QgsCoordinateTransform(crs, wgs84, QgsProject.instance())
+    center_wgs84 = transform.transform(point)
+    suggestion = _suggest_danish_crs(center_wgs84)
+    if suggestion is None:
+        return just_saved
+
+    epsg, region = suggestion
+    answer = QMessageBox.question(
+        parent,
+        "Coordinate system",
+        f"This project's data looks like it's in {region}. Set the QGIS "
+        f"project's coordinate system to the recommended {epsg}, and use "
+        f"it for QThermonet's reprojections?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    )
+    if answer == QMessageBox.StandardButton.Yes:
+        slot["crs_choice"] = epsg
+        # Not just an internal QThermonet preference -- the project's own
+        # display/map CRS should actually change too, so what's shown in
+        # QGIS matches what QThermonet reprojects into.
+        QgsProject.instance().setCrs(QgsCoordinateReferenceSystem(epsg))
+
+    return just_saved
+
+
+def raise_if_nan(value, what: str) -> None:
+    """Stop the run with a clear message if a QGIS length/distance came back NaN.
+
+    Seen 2026-10-01: in a long-running QGIS session every ellipsoidal
+    measurement (`QgsDistanceArea`, `$length`) returned NaN until QGIS was
+    restarted -- Service Pipes then silently produced an empty layer. Called
+    from inside `processAlgorithm`, so the run's temp files are discarded and
+    no output is changed.
+
+    Parameters
+    ----------
+    value : float or None
+        The measured value.
+    what : str
+        What was measured, for the message (e.g. "a pipe length").
+
+    Raises
+    ------
+    QgsProcessingException
+        If `value` is NaN or not a number.
+
+    """
+    import math
+
+    from qgis.core import QgsProcessingException
+
+    try:
+        is_nan = value is None or math.isnan(float(value))
+    except (TypeError, ValueError):
+        is_nan = True
+    if is_nan:
+        raise QgsProcessingException(
+            f"QGIS returned an invalid value (NaN) for {what}. This happens when the "
+            "QGIS session gets into a bad state -- save your project, restart QGIS "
+            "and run the tool again. No files were changed."
+        )
+
+
+def open_algorithm_dialog(algorithm_id: str, parameters: dict | None = None) -> None:
+    """Open a Processing tool's dialog the way QGIS's own Processing Toolbox does.
+
+    Like QGIS 4's `ProcessingPlugin.executeAlgorithm`: create the dialog and
+    `exec()` it, without reading its results afterwards.
+    `processing.execAlgorithmDialog` does read them (`widget.results()`),
+    which fails with "wrapped C/C++ object of type AlgorithmWidget has been
+    deleted" when the dialog has already deleted itself on close (seen
+    2026-09-30). QThermonet's menu never uses those results anyway.
+
+    Parameters
+    ----------
+    algorithm_id : str
+        E.g. ``"QThermonet:full_dimensioning"``.
+    parameters : dict or None
+        Initial parameter values for the dialog.
+
+    """
+    import processing
+
+    dialog = processing.createAlgorithmDialog(algorithm_id, parameters or {})
+    if dialog is not None:
+        dialog.exec()
+
+
+def overwrite_confirm_disabled() -> bool:
+    """Whether the overwrite confirmation is switched off for this project.
+
+    Session-cached per project, like `setup_asked` -- resets on QGIS restart
+    or project switch, deliberately never persisted.
+
+    Returns
+    -------
+    bool
+        `True` once the user ticked "Don't warn me again" in
+        `output_handling.confirm_overwrite` for the current project.
+    """
+    return bool(_project_slot().get("overwrite_confirm_off", False))
+
+
+def disable_overwrite_confirm() -> None:
+    """Switch the overwrite confirmation off for this project, this session."""
+    _project_slot()["overwrite_confirm_off"] = True
+
+
+def project_crs_choice() -> str:
+    """The current project's recommended-CRS choice, cached this session.
+
+    Returns
+    -------
+    str
+        An EPSG authid (e.g. ``"EPSG:25832"``), or the ``"EPSG:3857"``
+        fallback if `maybe_prompt_project_setup` hasn't run yet this
+        project, or the user declined/was outside Denmark and Bornholm.
+    """
+    return _project_slot().get("crs_choice", "EPSG:3857")
+
+
+def prepare_algorithm_project_setup(
+    algorithm, parameters, context, feedback, layer_parameter_name=None
+) -> bool:
+    """Standard `prepareAlgorithm` body for a coordinate-input QThermonet algorithm.
+
+    `prepareAlgorithm` always runs on the main thread, unlike
+    `processAlgorithm` (which runs in the background by default) -- the only
+    safe place to call `maybe_prompt_project_setup` without forcing the
+    whole algorithm onto the main thread via `flags()`/`FlagNoThreading`
+    (which would also make QGIS block on the run with a modal "processing"
+    dialog, same as `get_ground_conductivity_algorithm.py`'s matplotlib
+    workaround -- not something every algorithm should inherit just for
+    this). Every algorithm that needs the project-setup prompt should call
+    this, one line, from its own `prepareAlgorithm`, rather than
+    reimplementing the layer lookup + call each time.
+
+    Parameters
+    ----------
+    algorithm : QgsProcessingAlgorithm
+        The algorithm instance (pass `self`, from its own `prepareAlgorithm`).
+    parameters : dict
+        As received by the caller's `prepareAlgorithm`.
+    context : QgsProcessingContext
+        As received by the caller's `prepareAlgorithm`.
+    feedback : QgsProcessingFeedback
+        As received by the caller's `prepareAlgorithm`.
+    layer_parameter_name : str or None
+        The parameter name of a vector-layer input to read `.crs()`/
+        `.extent()` from for the CRS suggestion, e.g. `self.PIPES_LAYER`.
+        `None` for an algorithm with no layer input this early (e.g. Full
+        Dimensioning, whose inputs are `.dat`/`.json` file paths) -- still
+        runs the unsaved-project check, just skips the CRS suggestion.
+
+    Returns
+    -------
+    bool
+        For the caller to return directly. Normally `True`. `False` if the
+        project was just saved for the first time during this call (see
+        `maybe_prompt_project_setup`'s return value) -- in that case, this
+        run's already-resolved parameters (e.g. an output path defaulted
+        from the project's folder before it had one) are stale, so the run
+        is aborted and the same tool's dialog is automatically reopened
+        (`open_algorithm_dialog`, deferred via `QTimer.singleShot`
+        to avoid re-entrancy with the still-unwinding aborted run) with
+        fresh defaults -- previously entered parameter values, including
+        input layer selections, are not carried over into the reopened
+        dialog.
+
+    """
+    layer = (
+        algorithm.parameterAsVectorLayer(parameters, layer_parameter_name, context)
+        if layer_parameter_name is not None else None
+    )
+    if layer:
+        just_saved = maybe_prompt_project_setup(
+            None, crs=layer.crs(), point=layer.extent().center(), feedback=feedback
+        )
+    else:
+        just_saved = maybe_prompt_project_setup(None, feedback=feedback)
+
+    if just_saved:
+        feedback.reportError(
+            "The project was just saved. Re-opening this tool with fresh "
+            "defaults (e.g. an output location that now points at the "
+            "project's folder) -- previously entered values, including "
+            "input layer selections, are not carried over. Please run it "
+            "again."
+        )
+        from qgis.utils import iface as _iface
+        if _iface is not None:
+            from qgis.PyQt.QtCore import QTimer
+
+            algorithm_id = algorithm.id()
+            # Deferred to the next event-loop iteration rather than called
+            # directly here -- this run (and its dialog) is still unwinding
+            # from returning False; opening a new dialog for the same
+            # algorithm before that finishes risks re-entrancy issues.
+            QTimer.singleShot(0, lambda: open_algorithm_dialog(algorithm_id))
+        return False
+
+    return True
