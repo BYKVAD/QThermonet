@@ -191,6 +191,26 @@ def get_logo(filename: str) -> str:
     return get_resource(f"logos/{filename}")
 
 
+def dimmed_text_css() -> str:
+    """CSS colour for secondary text (hints, status, units) in the current theme.
+
+    The theme's placeholder-text colour: the text colour at reduced opacity,
+    so it works in both light and dark mode -- fixed greys were near
+    unreadable on Windows' dark theme. Written as ``rgba()`` because
+    `QColor.name()` drops the alpha (white at half opacity became white).
+
+    Returns
+    -------
+    str
+        E.g. ``"rgba(255, 255, 255, 128)"``, for a stylesheet ``color:``.
+    """
+    from qgis.PyQt.QtGui import QPalette
+    from qgis.PyQt.QtWidgets import QApplication
+
+    color = QApplication.palette().color(QPalette.ColorRole.PlaceholderText)
+    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
+
+
 #: Roles that exist only in one settings-file template -- used to detect a
 #: loaded file's mode without asking the user, by checking which side's
 #: unique roles it has.

@@ -107,6 +107,35 @@ def style_main_pipes(layer):
     layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
 
 
+def check_pipes_layer(pipes_layer):
+    """Reject a Source Placement output selected as the main pipes layer.
+
+    An HHE trench layer is itself a line layer, so the pipes dropdown can
+    silently pre-select it -- the run then "succeeds" with the trenches as
+    the whole pipe network and no mains at all. Shared by Main Pipe
+    Hierarchy and Build Pipe Network.
+
+    Parameters
+    ----------
+    pipes_layer : QgsVectorLayer or None
+        The selected main pipes layer.
+
+    Returns
+    -------
+    tuple[bool, str]
+        ``(True, "")`` if the layer is acceptable, else ``(False, message)``
+        -- the shape `checkParameterValues` returns.
+
+    """
+    if pipes_layer is not None and "is_connection_node" in pipes_layer.fields().names():
+        return False, (
+            f"The selected main pipes layer ('{pipes_layer.name()}') looks like "
+            "a Source Placement output (it has an 'is_connection_node' field). "
+            "Select the main pipes/roads layer instead."
+        )
+    return True, ""
+
+
 class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
     #Handle input/output
@@ -174,18 +203,7 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         ok, message = super().checkParameterValues(parameters, context)
         if not ok:
             return ok, message
-
-        # An HHE trench layer is itself a line layer, so the pipes dropdown
-        # can silently pre-select it -- the run then "succeeds" with the
-        # trenches as the whole pipe network and no mains at all.
-        pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
-        if pipes_layer is not None and "is_connection_node" in pipes_layer.fields().names():
-            return False, (
-                f"The selected main pipes layer ('{pipes_layer.name()}') looks like "
-                "a Source Placement output (it has an 'is_connection_node' field). "
-                "Select the main pipes/roads layer instead."
-            )
-        return True, ""
+        return check_pipes_layer(self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context))
 
     def prepareAlgorithm(self, parameters, context, feedback):
         if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.PIPES_LAYER):

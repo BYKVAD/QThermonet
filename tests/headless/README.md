@@ -12,6 +12,7 @@ output-handling work (see
 | `test_localize_borefield.py` | QThermonet's QGIS-based borefield localization gives the same result as pythermonet's pyproj-based one, and survives repeated background-thread runs |
 | `test_source_placement_restore.py` | Source Placement reads node and rotation back from a previous export |
 | `test_trench_refresh.py` | The HHE trench refresh rewrites the file (no doubled trenches), keeps style and CRS |
+| `test_build_pipe_network.py` | Build Pipe Network on a generated network: full run, re-run keeps layers in place, a failing step 2/3 commits only the steps before it, a step 1 failure or cancel changes nothing, no temp files left |
 | `test_project_settings_link.py` | The project remembers its settings file across a QGIS restart (simulated in a fresh process); first save keeps the session; "Save As", a new project and a deleted settings file start empty |
 
 ## Running

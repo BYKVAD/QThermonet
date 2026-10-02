@@ -96,7 +96,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         param.setHelp(
             "The service pipes layer must:\n"
             "- contain the service pipes connecting the heatpumps to the main thermonet pipes.\n"
-            "- Contain the heatpump ID's of the heatpumps in field with name 'id.lokalId' \n"
+            "- Contain the heatpump ID's of the heatpumps in field with name 'id_lokalId' \n"
             "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
         )
 
@@ -279,6 +279,15 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         expr_context = QgsExpressionContext()
         expr_context.appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(service_pipes_layer_proj))
 
+        # The heat pump IDs are copied from the buildings layer by Service
+        # Pipes; they link the topology to the heat loads file.
+        if "id_lokalId" not in service_pipes_layer_proj.fields().names():
+            raise QgsProcessingException(
+                "The service pipes layer has no 'id_lokalId' field with the heat pump IDs. "
+                "Run Shortest Service Pipes with a buildings layer that has it (e.g. the "
+                "Get Buildings or Heat Loads output), then run Pipe Topology again."
+            )
+
         # Copy features from the service pipes layer
         feedback.pushInfo("Handling service pipes ...")
         pipeNo = 0
@@ -302,7 +311,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature["Trace_(m)"] = Trace_length
             new_feature["Number_of_traces"] = 1
             new_feature["Max_pressure_loss_(Pa)"] = 180 * Trace_length
-            new_feature["HP_ID_vector"] = feature["id.lokalId"]
+            new_feature["HP_ID_vector"] = feature["id_lokalId"]
             out_features.append(new_feature)
 
             # Update dat file
@@ -379,12 +388,9 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             # Collect IDs of the nearby service pipes
             connected_ids = []
             for f in nearby_service_pipes:
-                if "id.lokalId" in f.fields().names():
-                    connected_ids.append(f["id.lokalId"])
-                    feedback.pushInfo(f"Service pipe ID found: {f['id.lokalId']}")
-                else:
-                    feedback.pushInfo("Field 'id.lokalId' not found in feature.")
-                    
+                connected_ids.append(f["id_lokalId"])
+                feedback.pushInfo(f"Service pipe ID found: {f['id_lokalId']}")
+
             # Kept as a list (joined only when written out) so an empty
             # contribution can't leave a stray ", " in the HP_ID_vector.
             ids_list = [str(hp_id) for hp_id in connected_ids]
@@ -431,7 +437,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                     "to it or downstream of it -- a pipe carrying no flow can't be "
                     "dimensioned. This is usually a stretch of the main pipes layer "
                     "past the last connected building; trim it and re-run Main Pipe "
-                    "Hierarchy and Pipe Topology."
+                    "Hierarchy and Pipe Topology or the full Build Pipe Network again."
                 )
 
             combined_ids = ", ".join(unique_ids)
@@ -537,7 +543,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             "ID's are connected to which pipe segment<p> "
             "<p> 2. A service pipes layer containing the service "
             "pipes connecting each building/heatpump to the thermonet. "
-            "This layer should hold the ID's of the heatpumps in a field called 'id.lokalId'. <p> "                
+            "This layer should hold the ID's of the heatpumps in a field called 'id_lokalId'. <p> "                
             " The tool stores the relevant information in new geojson and dat files. <p>"
             "<p> The output dat-file can be used as input for full "
             "dimensioning of the thermonet using pythermonet <p>"

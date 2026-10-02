@@ -61,8 +61,9 @@ from qgis.gui import (
     QgsVertexMarker,
 )
 from qgis.PyQt.QtCore import QMetaType, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QPainter, QPen, QPixmap
+from qgis.PyQt.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QDialog,
@@ -544,13 +545,16 @@ class _ConnectionNodeTool(QgsMapTool):
         super().deactivate()
 
 
+# Theme colours, not fixed ones: a fixed light background left the titles
+# (which use the theme's text colour) white on white in Windows dark mode.
 _CARD_STYLE_UNSELECTED = (
     "QFrame#templateCard {"
-    " border: 1.5px solid #c6c6c6; border-radius: 6px; background-color: #ffffff; }"
+    " border: 1.5px solid palette(mid); border-radius: 6px; background-color: palette(base); }"
 )
 _CARD_STYLE_SELECTED = (
     "QFrame#templateCard {"
-    " border: 2px solid #0067c0; border-radius: 6px; background-color: #eaf3fc; }"
+    " border: 2px solid palette(highlight); border-radius: 6px;"
+    " background-color: palette(alternate-base); }"
 )
 
 
@@ -566,7 +570,7 @@ def _mode_icon(mode: str) -> QPixmap:
     Returns
     -------
     QPixmap
-        A 26x26, transparent-background icon in the accent blue.
+        A 26x26, transparent-background icon in the theme's highlight colour.
     """
     size = 26
     pixmap = QPixmap(size, size)
@@ -574,7 +578,7 @@ def _mode_icon(mode: str) -> QPixmap:
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    accent = QColor("#0067c0")
+    accent = QApplication.palette().color(QPalette.ColorRole.Highlight)
 
     thick_pen = QPen(accent)
     thick_pen.setWidthF(2.0)
@@ -659,7 +663,7 @@ class _TemplateChoiceDialog(QDialog):
             "settings content itself."
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: #8a8a8a; font-size: 11px;")
+        note.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         layout.addWidget(note)
 
         path_row = QHBoxLayout()
@@ -717,7 +721,7 @@ class _TemplateChoiceDialog(QDialog):
 
         desc_label = QLabel(description)
         desc_label.setWordWrap(True)
-        desc_label.setStyleSheet("color: #5f5f5f; font-size: 11px;")
+        desc_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         card_layout.addWidget(desc_label)
 
         return card
@@ -796,7 +800,7 @@ class SourcePlacementDialog(QDialog):
         outer.addWidget(self._build_settings_file_row())
 
         self._mode_label = QLabel("No settings file loaded.")
-        self._mode_label.setStyleSheet("color: #5f5f5f; font-size: 11px;")
+        self._mode_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         outer.addWidget(self._mode_label)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -807,7 +811,7 @@ class SourcePlacementDialog(QDialog):
         outer.addWidget(splitter, stretch=1)
 
         self._status_label = QLabel("Click “Set Connection Node”, then click the map.")
-        self._status_label.setStyleSheet("color: #6b6b6b; font-size: 11px;")
+        self._status_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         outer.addWidget(self._status_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -885,7 +889,7 @@ class SourcePlacementDialog(QDialog):
             "Browse or create a settings file above to begin."
         )
         self._empty_state_label.setWordWrap(True)
-        self._empty_state_label.setStyleSheet("color: #8a8a8a; font-size: 11px;")
+        self._empty_state_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         panel.addWidget(self._empty_state_label)
 
         self._bhe_panel = self._build_bhe_panel()

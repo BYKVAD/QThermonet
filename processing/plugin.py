@@ -192,7 +192,16 @@ class QThermonetPlugin(object):
         self.iface.addPluginToMenu(u"&QThermonet", self.action_full_dimensioning)
         self.menu.addAction(self.action_full_dimensioning)
         self.plugin_actions.append(self.action_full_dimensioning)
-        
+
+        # Tool: Build pipe network (at the bottom for now; Part 8 reorders the menu)
+        self.action_build_pipe_network = QAction(
+            QIcon(utils.get_logo('logo6-pipes-simple.png')),
+            u"Build Pipe Network", self.iface.mainWindow())
+        self.action_build_pipe_network.triggered.connect(self.run_BuildPipeNetwork)
+        self.iface.addPluginToMenu(u"&QThermonet", self.action_build_pipe_network)
+        self.menu.addAction(self.action_build_pipe_network)
+        self.plugin_actions.append(self.action_build_pipe_network)
+
         # # Tool: Run pythermonet
         # icon_qpythermonet = os.path.join(os.path.join(cmd_folder, 'logo.png'))
         # self.action_qpythermonet = QAction(
@@ -277,6 +286,9 @@ class QThermonetPlugin(object):
                 
     def run_FullDimensioning(self):
         utils.open_algorithm_dialog("QThermonet:full_dimensioning")
+
+    def run_BuildPipeNetwork(self):
+        utils.open_algorithm_dialog("QThermonet:build_pipe_network")
         
     # def run_qpythermonet(self):
     #     processing.execAlgorithmDialog("QThermonet:Dimension sources")

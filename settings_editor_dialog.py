@@ -32,7 +32,7 @@ from . import utils
 from .output_handling import OutputCommitError
 from .source_placement_dialog import refresh_hhe_trench_layer
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QFont, QFontMetrics
+from qgis.PyQt.QtGui import QFont, QFontMetrics, QPalette
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QDialog,
@@ -134,8 +134,15 @@ _PROBLEM_LINE_RE = re.compile(
 # box model the whole time removes that jump.
 _GROUPBOX_MARGIN_TOP = 6  # px of headroom above the border the title floats in
 
+# Theme-dependent where possible (Windows dark mode made fixed dark titles
+# unreadable). The error red reads on both themes; its background is a
+# translucent tint, so it's light pink on a light theme and dark red on a
+# dark one, and the theme's own text colour stays readable on it.
+_ERROR_RED = "#d13438"
+_ERROR_TINT = "rgba(209, 52, 56, 0.12)"
 
-def _groupbox_style(border_color: str, background: str, title_color: str = "#1a1a1a") -> str:
+
+def _groupbox_style(border_color: str, background: str, title_color: str = "palette(window-text)") -> str:
     """Build a QGroupBox stylesheet with a bold title centered on the border.
 
     Qt's default title placement, combined with a plain `border` rule, does
@@ -166,14 +173,25 @@ def _groupbox_style(border_color: str, background: str, title_color: str = "#1a1
     )
 
 
-_NORMAL_BOX_STYLE = _groupbox_style("#d0d0d0", "transparent")
-_ERROR_BORDER_STYLE_BOX = _groupbox_style("#d13438", "#fef4f4", title_color="#a4262c")
+#: Opacity (0-255) of the theme's text colour used for the normal group
+#: border -- `palette(mid)` was nearly invisible on Windows' dark theme.
+_BORDER_ALPHA = 90  # ~35 %
+
+
+def _normal_box_style() -> str:
+    """The normal group box style, with the border read from the current theme."""
+    text = QApplication.palette().color(QPalette.ColorRole.WindowText)
+    border = f"rgba({text.red()}, {text.green()}, {text.blue()}, {_BORDER_ALPHA})"
+    return _groupbox_style(border, "transparent")
+
+
+_ERROR_BORDER_STYLE_BOX = _groupbox_style(_ERROR_RED, _ERROR_TINT, title_color=_ERROR_RED)
 
 _NORMAL_FIELD_STYLE = (
     "QFrame { border: 2px solid transparent; border-radius: 4px; background-color: transparent; }"
 )
 _ERROR_BORDER_STYLE_FIELD = (
-    "QFrame { border: 2px solid #d13438; border-radius: 4px; background-color: #fef4f4; }"
+    f"QFrame {{ border: 2px solid {_ERROR_RED}; border-radius: 4px; background-color: {_ERROR_TINT}; }}"
 )
 
 
@@ -372,7 +390,7 @@ class SettingsEditorDialog(QDialog):
         outer.addLayout(header)
 
         self._mode_label = QLabel("No settings file loaded.")
-        self._mode_label.setStyleSheet("color: #5f5f5f; font-size: 11px;")
+        self._mode_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         outer.addWidget(self._mode_label)
 
         self._scroll_area = QScrollArea()
@@ -381,7 +399,7 @@ class SettingsEditorDialog(QDialog):
         outer.addWidget(self._scroll_area, stretch=1)
 
         self._status_label = QLabel("Ready.")
-        self._status_label.setStyleSheet("color: #6b6b6b; font-size: 11px;")
+        self._status_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
         outer.addWidget(self._status_label)
 
         self._error_panel = self._build_error_panel()
@@ -399,8 +417,8 @@ class SettingsEditorDialog(QDialog):
         panel = QFrame()
         panel.setObjectName("errorPanel")
         panel.setStyleSheet(
-            "QFrame#errorPanel { border: 1px solid #d13438; border-radius: 4px; "
-            "background-color: #fde7e9; }"
+            f"QFrame#errorPanel {{ border: 1px solid {_ERROR_RED}; border-radius: 4px; "
+            f"background-color: {_ERROR_TINT}; }}"
         )
         layout = QVBoxLayout(panel)
 
@@ -409,12 +427,12 @@ class SettingsEditorDialog(QDialog):
         mono_font.setStyleHint(QFont.StyleHint.Monospace)
         self._error_message_label.setFont(mono_font)
         self._error_message_label.setWordWrap(True)
-        self._error_message_label.setStyleSheet("color: #7a1721;")
+        self._error_message_label.setStyleSheet(f"color: {_ERROR_RED};")
         layout.addWidget(self._error_message_label)
 
         self._error_guidance_label = QLabel()
         self._error_guidance_label.setWordWrap(True)
-        self._error_guidance_label.setStyleSheet("color: #3a3a3a; font-size: 11px;")
+        self._error_guidance_label.setStyleSheet("font-size: 11px;")
         layout.addWidget(self._error_guidance_label)
 
         path_row = QHBoxLayout()
@@ -521,7 +539,7 @@ class SettingsEditorDialog(QDialog):
         self, role: str, block: dict, normal_font: QFont, label_width: int
     ) -> QGroupBox:
         box = QGroupBox(_display_label(role))
-        box.setStyleSheet(_NORMAL_BOX_STYLE)
+        box.setStyleSheet(_normal_box_style())
 
         # `QGroupBox::title { font-weight: bold }` isn't honored by every Qt
         # style (notably the native-themed ones QGIS 4 can run under), so the
@@ -551,7 +569,7 @@ class SettingsEditorDialog(QDialog):
 
             unit_label = QLabel(_display_unit(str(entry.get("unit", ""))))
             unit_label.setFont(normal_font)
-            unit_label.setStyleSheet("color: #6b6b6b; font-size: 11px;")
+            unit_label.setStyleSheet(f"color: {utils.dimmed_text_css()}; font-size: 11px;")
             unit_label.setMinimumWidth(40)
 
             container = QFrame()
@@ -763,7 +781,7 @@ class SettingsEditorDialog(QDialog):
 
     def _clear_error_highlight(self) -> None:
         for box in self._role_boxes.values():
-            box.setStyleSheet(_NORMAL_BOX_STYLE)
+            box.setStyleSheet(_normal_box_style())
         for row in self._field_rows:
             row.container.setStyleSheet(_NORMAL_FIELD_STYLE)
 

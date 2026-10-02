@@ -229,18 +229,19 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             for feature in input_features:
                 thermonet_values.append(feature.attribute("Thermonet"))
              
-        # Step 3: Copy or create id.lokalId field for use as Heatpump ID
+        # Step 3: Copy or create id_lokalId field for use as Heatpump ID
+        # (the Datafordeler WFS's own field name, as Get Buildings writes it)
         lokalId_values = []
-        if not any(field.name() == "id.lokalId" for field in input_fields):
-            feedback.pushInfo("'id.lokalId' field not found, assigning unique IDs...")
+        if not any(field.name() == "id_lokalId" for field in input_fields):
+            feedback.pushInfo("'id_lokalId' field not found, assigning unique IDs...")
             feature_count = 0
             for feature in input_features:  # Update existing features
                 feature_count += 1
                 lokalId_values.append(f"{str(feature_count)}")
         else:
-            feedback.pushInfo("Copying 'id.lokalId' features...")
+            feedback.pushInfo("Copying 'id_lokalId' features...")
             for feature in input_features:
-                lokalId_values.append(feature.attribute("id.lokalId"))
+                lokalId_values.append(feature.attribute("id_lokalId"))
         
         # Step 4: Copy BBR information
         BuildYear_values = []
@@ -276,7 +277,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             BuildYear_values, BuildCode_values, BBRArea_values, thermonet_values, feedback)
         
         # Step 6: Create updated features
-        updated_fields.append(QgsField("id.lokalId", QMetaType.Type.QString))
+        updated_fields.append(QgsField("id_lokalId", QMetaType.Type.QString))
         updated_fields.append(QgsField("BBRUUID", QMetaType.Type.QString))
         updated_fields.append(QgsField("Thermonet", QMetaType.Type.QString))
         updated_fields.append(QgsField("BuildYear", QMetaType.Type.Int, "integer", len=4))
@@ -296,7 +297,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         
             # Combine attributes
             attributes = [None] * len(updated_fields)
-            attributes[updated_fields.indexOf("id.lokalId")] = lokalId_values[idx] if idx < len(lokalId_values) else None
+            attributes[updated_fields.indexOf("id_lokalId")] = lokalId_values[idx] if idx < len(lokalId_values) else None
             attributes[updated_fields.indexOf("BBRUUID")] = bbruuid_values[idx] if idx < len(bbruuid_values) else None
             attributes[updated_fields.indexOf("Thermonet")] = thermonet_values[idx] if idx < len(thermonet_values) else None
             attributes[updated_fields.indexOf("BuildYear")] = BuildYear_values[idx] if idx < len(BuildYear_values) else None
@@ -349,7 +350,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
                 ).names() else None
                 if thermonet_value and str(thermonet_value).lower() == "yes":
                     dat_file.write(
-                        f"{feature['id.lokalId']}\t"
+                        f"{feature['id_lokalId']}\t"
                         f"{int(round(feature['YrHeatLoad']))}\t"
                         f"{int(round(feature['WiHeatLoad']))}\t"
                         f"{int(round(feature['DyHeatLoad']))}\t"
