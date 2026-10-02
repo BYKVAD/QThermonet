@@ -1045,7 +1045,7 @@ class SourcePlacementDialog(QDialog):
 
     def _on_browse_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Settings File", "", "Settings JSON (*.json)"
+            self, "Open Settings File", utils.default_save_directory(), "Settings JSON (*.json)"
         )
         if not path:
             return

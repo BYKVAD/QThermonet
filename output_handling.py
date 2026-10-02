@@ -9,13 +9,14 @@ Two pieces, used together (see
 - :class:`OutputSet` -- a run writes every output to a temporary file in a
   ``.qthermonet-tmp/`` folder next to the real file, and only after the run
   succeeded does :meth:`OutputSet.commit` (GUI thread, from
-  ``postProcessAlgorithm``) remove any loaded layer on the real file, swap
-  the file in, reload the layer with its previous style and position, and
+  ``postProcessAlgorithm``) briefly point any loaded layer on the real file
+  at an in-memory placeholder, swap the file in, point the layer back at it
+  (same layer: ID, style, position, visibility and joins all kept), and
   cache the path.
 
 Why the swap exists: a loaded layer keeps its file open on Windows, so
-writing over it directly fails ("Permission denied"); removing the layer
-first releases the lock. Why it runs after the run: layers and the project
+writing over it directly fails ("Permission denied"); detaching the layer
+from the file first releases the lock. Why it runs after the run: layers and the project
 must only be touched from the GUI thread, and a failed run must leave the
 real files untouched.
 """
@@ -29,7 +30,8 @@ from dataclasses import dataclass, field
 
 from qgis.core import (
     QgsCoordinateTransformContext,
-    QgsLayerTree,
+    QgsDataProvider,
+    QgsMemoryProviderUtils,
     QgsProcessingException,
     QgsProject,
     QgsVectorFileWriter,
@@ -37,7 +39,6 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent
-from qgis.PyQt.QtXml import QDomDocument
 
 from . import utils
 
@@ -118,7 +119,18 @@ def write_geojson(path, fields, geometry_type, crs, features) -> None:
     layer.setCrs(crs)
     layer.dataProvider().addAttributes(fields.toList())
     layer.updateFields()
-    layer.dataProvider().addFeatures(list(features))
+    features = list(features)
+    ok, _ = layer.dataProvider().addFeatures(features)
+    if not ok or layer.featureCount() != len(features):
+        # e.g. an attribute value that can't be converted to its field type,
+        # or a geometry of the wrong type -- without this the file would be
+        # written with features silently missing (verified 2026-10-01).
+        errors = layer.dataProvider().errors()
+        reason = f" ({errors[-1]})" if errors else ""
+        raise OSError(
+            f"Could not write {name}: only {layer.featureCount()} of {len(features)} "
+            f"features could be stored{reason}."
+        )
     layer.updateExtents()
 
     options = QgsVectorFileWriter.SaveVectorOptions()
@@ -260,16 +272,6 @@ class _FolderEntry:
 
 
 @dataclass
-class _OldLayer:
-    name: str
-    source: str
-    provider: str
-    style: QDomDocument
-    parent: object | None  # QgsLayerTreeGroup
-    index: int
-
-
-@dataclass
 class OutputSet:
     """The outputs of one run, written to temporary files until committed.
 
@@ -376,6 +378,15 @@ class OutputSet:
                     os.remove(entry.path_temp)
                 except OSError:
                     pass
+            # The dropped entry is no longer listed, so the later cleanup
+            # wouldn't visit its temp folder -- remove it here if now empty
+            # (e.g. roads saved to a different folder than the buildings).
+            temp_folder = os.path.dirname(entry.path_temp)
+            if os.path.isdir(temp_folder) and not os.listdir(temp_folder):
+                try:
+                    os.rmdir(temp_folder)
+                except OSError:
+                    pass
 
     def discard(self) -> None:
         """Delete all temporary files -- call when the run failed or was cancelled."""
@@ -394,7 +405,7 @@ class OutputSet:
         self._remove_empty_temp_folders()
 
     def commit(self, feedback=None) -> None:
-        """Swap every output into place, reload layers, cache paths.
+        """Swap every output into place, point loaded layers at it, cache paths.
 
         GUI thread only (``postProcessAlgorithm``, or a dialog). Files are
         swapped one at a time; if one can't be (e.g. it's open in another
@@ -438,9 +449,13 @@ class OutputSet:
                     os.replace(os.path.join(entry.path_temp, name), target)
                     updated.append(target)
         except (OSError, OutputCommitError) as exc:
-            not_updated = [
-                e.path_real for e in self._files if e.path_real not in updated
-            ] + [e.path_real for e in self._folders if e.path_real not in updated]
+            not_updated = [e.path_real for e in self._files if e.path_real not in updated]
+            # A folder's own path is never in `updated` (only the files moved
+            # into it are), so look at what's still waiting in its temp folder
+            # -- before discard() deletes it.
+            for e in self._folders:
+                waiting = sorted(os.listdir(e.path_temp)) if os.path.isdir(e.path_temp) else []
+                not_updated += [os.path.join(e.path_real, name) for name in waiting]
             self.discard()
             lines = [f"Could not update the output files: {exc}"]
             if updated:
@@ -455,74 +470,83 @@ class OutputSet:
                 feedback.pushInfo(f"Updated {path}")
 
     def _commit_file(self, entry: _FileEntry, updated: list[str], feedback) -> None:
-        old, n_removed = self._remove_loaded_layers(entry.path_real)
+        loaded = self._detach_loaded_layers(entry.path_real)
         if feedback is not None:
             feedback.pushInfo(
-                f"{os.path.basename(entry.path_real)}: replacing {n_removed} loaded layer(s)"
+                f"{os.path.basename(entry.path_real)}: replacing {len(loaded)} loaded layer(s)"
             )
         try:
             _replace_or_flush_and_retry(entry.path_temp, entry.path_real)
         except OSError:
-            if old is not None:
-                # File unchanged -- put the removed layer back as it was.
-                self._load_layer(old.source, old.name, old.provider, old, None)
+            # File unchanged -- point every layer back at it, as it was.
+            self._reattach_layers(loaded)
             raise
         updated.append(entry.path_real)
         for role in entry.cache_roles:
             utils.set_cached_path(role, entry.path_real)
-        # A layer the user already had comes back even for outputs a tool
-        # doesn't load itself -- it keeps its own name, source and provider.
-        if old is not None:
-            self._load_layer(old.source, old.name, old.provider, old, None)
+        if loaded:
+            # The user's own layers (duplicates included) stay the same layer
+            # objects -- same ID, name, style, place, visibility, joins -- and
+            # just show the new file.
+            self._reattach_layers(loaded)
         elif entry.layer_name is not None:
-            self._load_layer(entry.path_real, entry.layer_name, "ogr", None, entry.style_default)
+            self._load_new_layer(entry.path_real, entry.layer_name, entry.style_default)
 
     @staticmethod
-    def _remove_loaded_layers(path_real: str) -> tuple[_OldLayer | None, int]:
-        """Remove every loaded layer on `path_real`; return the first one's details and the count."""
-        project = QgsProject.instance()
+    def _detach_loaded_layers(path_real: str) -> list[tuple[QgsVectorLayer, str, str]]:
+        """Point every loaded layer on `path_real` at an empty placeholder; return them.
+
+        Each layer on the file holds it open on Windows, so all must let go
+        before the swap -- but instead of removing them, each layer object is
+        kept and only its data source is switched (to an in-memory
+        placeholder with the same geometry type and fields, so its style and
+        field settings don't notice). That keeps its layer ID, and with it
+        everything that refers to it: joins, relations, map themes, print
+        layouts. [Verified 2026-10-01 -- headless experiment: lock released
+        (incl. after a pooled read), ID/style/visibility/position/join kept]
+
+        Returns
+        -------
+        list of (QgsVectorLayer, str, str)
+            Each detached layer with its own original source and provider,
+            for `_reattach_layers`.
+
+        """
         target = normalize_path(path_real)
-        old = None
-        n_removed = 0
-        for layer in list(project.mapLayers().values()):
-            if not isinstance(layer, QgsVectorLayer) or normalize_path(layer.source()) != target:
-                continue
-            if old is None:
-                style = QDomDocument()
-                layer.exportNamedStyle(style)
-                parent, index = None, 0
-                node = project.layerTreeRoot().findLayer(layer.id())
-                if node is not None and node.parent() is not None:
-                    parent = node.parent()
-                    index = next(
-                        (
-                            i
-                            for i, child in enumerate(parent.children())
-                            if QgsLayerTree.isLayer(child) and child.layerId() == layer.id()
-                        ),
-                        0,
-                    )
-                old = _OldLayer(
-                    layer.name(), layer.source(), layer.providerType(), style, parent, index
-                )
-            project.removeMapLayer(layer.id())
-            n_removed += 1
-        return old, n_removed
+        loaded = [
+            (layer, layer.source(), layer.providerType())
+            for layer in QgsProject.instance().mapLayers().values()
+            if isinstance(layer, QgsVectorLayer) and normalize_path(layer.source()) == target
+        ]
+        for layer, _source, _provider in loaded:
+            placeholder = QgsMemoryProviderUtils.createMemoryLayer(
+                "placeholder", layer.fields(), layer.wkbType(), layer.crs()
+            )
+            layer.setDataSource(
+                placeholder.source(), layer.name(), "memory", QgsDataProvider.ProviderOptions()
+            )
+        return loaded
 
     @staticmethod
-    def _load_layer(source, name, provider, old, style_default) -> None:
-        layer = QgsVectorLayer(source, name, provider)
+    def _reattach_layers(loaded: list[tuple[QgsVectorLayer, str, str]]) -> None:
+        """Point each layer back at its own original source (keeps filters/options in it)."""
+        failed = []
+        for layer, source, provider in loaded:
+            layer.setDataSource(source, layer.name(), provider, QgsDataProvider.ProviderOptions())
+            if not layer.isValid():
+                failed.append(layer.name())
+            layer.triggerRepaint()
+        if failed:
+            raise OutputCommitError(f"Could not reload layer(s): {', '.join(failed)}.")
+
+    @staticmethod
+    def _load_new_layer(path, name, style_default) -> None:
+        """Load an output that wasn't on the map yet, with the tool's default style."""
+        layer = QgsVectorLayer(path, name, "ogr")
         if not layer.isValid():
-            raise OutputCommitError(f"Could not load {source} as a layer.")
-        project = QgsProject.instance()
-        if old is not None and old.parent is not None:
-            project.addMapLayer(layer, False)
-            old.parent.insertLayer(old.index, layer)
-        else:
-            project.addMapLayer(layer)
-        if old is not None:
-            layer.importNamedStyle(old.style)
-        elif style_default is not None:
+            raise OutputCommitError(f"Could not load {path} as a layer.")
+        QgsProject.instance().addMapLayer(layer)
+        if style_default is not None:
             style_default(layer)
         layer.triggerRepaint()
 

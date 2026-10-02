@@ -14,16 +14,21 @@ import shutil
 import _harness
 from _harness import check
 from qgis.core import (
+    QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsFeature,
+    QgsField,
     QgsFields,
     QgsGeometry,
     QgsPointXY,
     QgsProject,
-    QgsVectorFileWriter,
+    QgsRendererCategory,
+    QgsSymbol,
     QgsVectorLayer,
+    QgsVectorLayerJoinInfo,
     QgsWkbTypes,
 )
+from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 
 from QThermonet import output_handling, utils
@@ -87,6 +92,132 @@ check("re-export: new contents (5 features)", bool(new) and new[0].featureCount(
 check("re-export: copied style kept", bool(new) and new[0].renderer().symbol().color().name() == "#00ff00")
 check("re-export: same group and position", [c.name() for c in group.children()] == ["other", "My renamed layer"])
 
+# 2b. The same file loaded twice ("Duplicate Layer"): both come back, each
+#     with its own name, style and position -- after a swap and a rollback.
+dup = os.path.join(d, "dup.geojson")
+write_points(dup, 1)
+dgroup = root.addGroup("dup-grp")
+spacer1 = QgsVectorLayer("Point?crs=EPSG:25832", "spacer1", "memory")
+spacer2 = QgsVectorLayer("Point?crs=EPSG:25832", "spacer2", "memory")
+copy_a = QgsVectorLayer(dup, "Copy A", "ogr")
+copy_b = QgsVectorLayer(dup, "Copy B", "ogr")
+for lyr in (spacer1, copy_a, spacer2, copy_b):
+    project.addMapLayer(lyr, False)
+    dgroup.addLayer(lyr)
+copy_a.renderer().symbol().setColor(QColor("#0000ff"))
+copy_b.renderer().symbol().setColor(QColor("#ffff00"))
+expected_order = ["spacer1", "Copy A", "spacer2", "Copy B"]
+
+
+def dup_state():
+    order = [c.name() for c in dgroup.children()]
+    colours = {n: project.mapLayersByName(n)[0].renderer().symbol().color().name()
+               for n in ("Copy A", "Copy B") if project.mapLayersByName(n)}
+    counts = {n: project.mapLayersByName(n)[0].featureCount() for n in ("Copy A", "Copy B")
+              if project.mapLayersByName(n)}
+    return order, colours, counts
+
+
+outs = output_handling.OutputSet()
+tmp = outs.add_file(dup, layer_name="Dup")
+write_points(tmp, 3)
+outs.commit()
+order, colours, counts = dup_state()
+check(f"duplicates: both back in their places after a swap {order}", order == expected_order)
+check("duplicates: each keeps its own style", colours == {"Copy A": "#0000ff", "Copy B": "#ffff00"})
+check("duplicates: both show the new contents", counts == {"Copy A": 3, "Copy B": 3})
+
+handle = open(dup, "rb")  # rollback case
+outs = output_handling.OutputSet()
+tmp = outs.add_file(dup, layer_name="Dup")
+write_points(tmp, 7)
+try:
+    outs.commit()
+except output_handling.OutputCommitError:
+    pass
+handle.close()
+order, colours, counts = dup_state()
+check(f"duplicates: both back in their places after a rollback {order}", order == expected_order)
+check("duplicates: old contents and styles after the rollback",
+      counts == {"Copy A": 3, "Copy B": 3} and colours == {"Copy A": "#0000ff", "Copy B": "#ffff00"})
+
+# 2c. The layer object itself survives (not removed + reloaded): same ID, so
+#     visibility, a categorized style, and a join from another layer all keep
+#     working -- after a swap and after a rollback.
+kept = os.path.join(d, "kept.geojson")
+kfields = QgsFields()
+kfields.append(QgsField("id", QMetaType.Type.QString))
+kfields.append(QgsField("Thermonet", QMetaType.Type.QString))
+
+
+def write_kept(path, n, tag):
+    feats = []
+    for i in range(n):
+        f = QgsFeature(kfields)
+        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500000 + i, 6200000)))
+        f["id"] = f"K{i}"
+        f["Thermonet"] = tag
+        feats.append(f)
+    output_handling.write_geojson(path, kfields, QgsWkbTypes.Point, CRS, feats)
+
+
+write_kept(kept, 2, "No")
+klayer = QgsVectorLayer(kept, "Kept", "ogr")
+project.addMapLayer(klayer)
+kept_id = klayer.id()
+root.findLayer(kept_id).setItemVisibilityChecked(False)
+cats = [QgsRendererCategory(v, QgsSymbol.defaultSymbol(klayer.geometryType()), v) for v in ("Yes", "No")]
+klayer.setRenderer(QgsCategorizedSymbolRenderer("Thermonet", cats))
+table = QgsVectorLayer("None?field=id:string", "table", "memory")
+tf = QgsFeature(table.fields())
+tf["id"] = "K0"
+table.dataProvider().addFeatures([tf])
+project.addMapLayer(table)
+join = QgsVectorLayerJoinInfo()
+join.setJoinLayer(klayer)
+join.setJoinFieldName("id")
+join.setTargetFieldName("id")
+join.setPrefix("j_")
+join.setUsingMemoryCache(False)
+table.addJoin(join)
+
+
+def kept_state():
+    lyr = project.mapLayer(kept_id)
+    renderer = lyr.renderer() if lyr else None
+    return (
+        lyr is not None,
+        root.findLayer(kept_id).itemVisibilityChecked() if lyr else None,
+        isinstance(renderer, QgsCategorizedSymbolRenderer) and renderer.classAttribute() == "Thermonet",
+        next(table.getFeatures())["j_Thermonet"],
+        lyr.featureCount() if lyr else None,
+    )
+
+
+outs = output_handling.OutputSet()
+tmp = outs.add_file(kept, layer_name="Kept")
+write_kept(tmp, 3, "Yes")
+_ = list(klayer.getFeatures())  # pooled read
+outs.commit()
+same, visible, categorized, joined, count = kept_state()
+check("kept layer: same layer ID after a swap", same)
+check("kept layer: still unticked after a swap", visible is False)
+check("kept layer: categorized style intact", categorized)
+check(f"kept layer: join shows the new values ({joined!r}), new contents ({count})", joined == "Yes" and count == 3)
+
+handle = open(kept, "rb")  # rollback case
+outs = output_handling.OutputSet()
+tmp = outs.add_file(kept, layer_name="Kept")
+write_kept(tmp, 5, "Rolled")
+try:
+    outs.commit()
+except output_handling.OutputCommitError:
+    pass
+handle.close()
+same, visible, categorized, joined, count = kept_state()
+check("kept layer: same layer ID, unticked, style intact after a rollback", same and visible is False and categorized)
+check(f"kept layer: old contents after the rollback ({joined!r}, {count})", joined == "Yes" and count == 3)
+
 # 3. Locked by "another program": commit fails cleanly, old layer back.
 handle = open(real, "rb")
 outs = output_handling.OutputSet()
@@ -124,6 +255,44 @@ for name in ("a.json", "b.json"):
 outs.commit()
 check("folder: files moved in", sorted(os.listdir(real_folder)) == ["a.json", "b.json"])
 check("folder: temp removed", not os.path.exists(os.path.join(d, ".qthermonet-tmp")))
+
+# 7. drop() in a folder of its own leaves no empty .qthermonet-tmp behind.
+other_dir = os.path.join(d, "elsewhere")
+os.makedirs(other_dir)
+outs = output_handling.OutputSet()
+outs.add_file(os.path.join(d, "kept_out.geojson"))
+dropped_tmp = outs.add_file(os.path.join(other_dir, "dropped.geojson"))
+write_points(dropped_tmp, 1)
+outs.drop(os.path.join(other_dir, "dropped.geojson"))
+check("drop: its temp folder is removed when empty",
+      not os.path.exists(os.path.join(other_dir, ".qthermonet-tmp")))
+outs.discard()
+
+# 8. A folder output that fails halfway: the message names exactly the files
+#    still waiting -- not the folder, not the files that did arrive.
+fail_folder = os.path.join(d, "modelica-fail")
+os.makedirs(fail_folder)
+with open(os.path.join(fail_folder, "b.json"), "w") as f:
+    f.write("old")
+blocker = open(os.path.join(fail_folder, "b.json"), "rb")  # "open in another program"
+outs = output_handling.OutputSet()
+tmp_folder = outs.add_folder(fail_folder)
+for name in ("a.json", "b.json"):
+    with open(os.path.join(tmp_folder, name), "w") as f:
+        f.write("new")
+try:
+    outs.commit()
+    check("folder failure: commit raised", False)
+except output_handling.OutputCommitError as exc:
+    message = str(exc)
+    not_updated_line = next(line for line in message.splitlines() if line.startswith("Not updated"))
+    check("folder failure: names the waiting file b.json as not updated",
+          os.path.join(fail_folder, "b.json") in not_updated_line)
+    check("folder failure: doesn't list the folder itself or the moved a.json as not updated",
+          not not_updated_line.rstrip().endswith(fail_folder)
+          and os.path.join(fail_folder, "a.json") not in not_updated_line)
+    check("folder failure: lists a.json as updated", os.path.join(fail_folder, "a.json") in message)
+blocker.close()
 
 project.clear()
 shutil.rmtree(d, ignore_errors=True)

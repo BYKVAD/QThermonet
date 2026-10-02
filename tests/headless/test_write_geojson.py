@@ -82,6 +82,24 @@ for label, crs in (
     except OSError:
         check(f"{label} refused", True)
 
+# 2b. Features the memory layer rejects are reported, not silently dropped.
+int_fields = QgsFields()
+int_fields.append(QgsField("n", QMetaType.Type.Int))
+bad_value = QgsFeature(int_fields)
+bad_value.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(0, 0), QgsPointXY(1, 1)]))
+bad_value["n"] = "abc"  # text in an Int field
+wrong_geom = QgsFeature(int_fields)
+wrong_geom.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(0, 0)))  # point into a line layer
+wrong_geom["n"] = 1
+for label, feature in (("text in a number field", bad_value), ("point into a line layer", wrong_geom)):
+    path = os.path.join(d, "rejected.geojson")
+    try:
+        oh.write_geojson(path, int_fields, QgsWkbTypes.LineString,
+                         QgsCoordinateReferenceSystem("EPSG:25832"), [feature])
+        check(f"rejected feature ({label}) reported", False)
+    except OSError as exc:
+        check(f"rejected feature ({label}) reported: {exc}", "0 of 1" in str(exc) and not os.path.exists(path))
+
 # 3. Point geometry.
 pt = QgsFeature(QgsFields())
 pt.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(557015, 6201021)))
