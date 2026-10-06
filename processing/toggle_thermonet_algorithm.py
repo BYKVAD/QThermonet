@@ -132,7 +132,7 @@ class ToggleThermonetAlgorithm(QgsProcessingAlgorithm):
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr("Optional: Toggle Thermonet Buildings")
+        return self.tr("Toggle Thermonet Buildings")
     
     def group(self):
         """

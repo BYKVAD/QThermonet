@@ -81,10 +81,8 @@ class QThermonetPlugin(object):
         # icon_get_buildings = os.path.join(cmd_folder, 'logo2.png')
         self.action_get_buildings = QAction(
             QIcon(icon_get_buildings),
-            u"Get Buildings and BBR Information", self.iface.mainWindow())
+            u"Get Buildings and Roads", self.iface.mainWindow())
         self.action_get_buildings.triggered.connect(self.run_GetbuildingsinAOI)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_get_buildings)
-        self.menu.addAction(self.action_get_buildings)
         self.plugin_actions.append(self.action_get_buildings)
         
         # Tool: Toggle Thermonet
@@ -92,10 +90,8 @@ class QThermonetPlugin(object):
         # icon_toggle_thermonet = os.path.join(cmd_folder, 'logo2a.png')
         self.action_toggle_thermonet = QAction(
             QIcon(icon_toggle_thermonet),
-            u"Optional: Toggle Thermonet Buildings", self.iface.mainWindow())
+            u"Toggle Thermonet Buildings", self.iface.mainWindow())
         self.action_toggle_thermonet.triggered.connect(self.run_ToggleThermonet)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_toggle_thermonet)
-        self.menu.addAction(self.action_toggle_thermonet)
         self.plugin_actions.append(self.action_toggle_thermonet)
         
         # Tool: Calculate heat loads
@@ -105,8 +101,6 @@ class QThermonetPlugin(object):
             QIcon(icon_load_calculation),
             u"Calculate Heat Loads", self.iface.mainWindow())
         self.action_load_calculation.triggered.connect(self.run_LoadCalculation)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_load_calculation)
-        self.menu.addAction(self.action_load_calculation)
         self.plugin_actions.append(self.action_load_calculation)
         
         # # Tool: Calculate Aggregated loads
@@ -126,8 +120,6 @@ class QThermonetPlugin(object):
             QIcon(icon_main_pipe_hierarchy),
             u"Main Pipe Hierarchy", self.iface.mainWindow())
         self.action_main_pipe_hierarchy.triggered.connect(self.run_MainPipeHierarchy)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_main_pipe_hierarchy)
-        self.menu.addAction(self.action_main_pipe_hierarchy)
         self.plugin_actions.append(self.action_main_pipe_hierarchy)
         
         # Tool: Service pipes
@@ -137,8 +129,6 @@ class QThermonetPlugin(object):
             QIcon(icon_service_pipes),
             u"Shortest Service Pipes", self.iface.mainWindow())
         self.action_service_pipes.triggered.connect(self.run_ShortestServicePipes)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_service_pipes)
-        self.menu.addAction(self.action_service_pipes)
         self.plugin_actions.append(self.action_service_pipes)
 
         # Tool: Get ground conductivity
@@ -147,8 +137,6 @@ class QThermonetPlugin(object):
             QIcon(icon_ground_conductivity),
             u"Get Ground Conductivity", self.iface.mainWindow())
         self.action_ground_conductivity.triggered.connect(self.run_GetGroundConductivity)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_ground_conductivity)
-        self.menu.addAction(self.action_ground_conductivity)
         self.plugin_actions.append(self.action_ground_conductivity)
         
         # Tool: Dimensioning Settings (not a Processing algorithm - opens a plain dialog)
@@ -157,8 +145,6 @@ class QThermonetPlugin(object):
             QIcon(icon_settings_editor),
             u"Dimensioning Settings", self.iface.mainWindow())
         self.action_settings_editor.triggered.connect(self.run_SettingsEditor)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_settings_editor)
-        self.menu.addAction(self.action_settings_editor)
         self.plugin_actions.append(self.action_settings_editor)
 
         # Tool: Source Placement (not a Processing algorithm - opens a plain dialog)
@@ -167,8 +153,6 @@ class QThermonetPlugin(object):
             QIcon(icon_source_placement),
             u"Source Placement", self.iface.mainWindow())
         self.action_source_placement.triggered.connect(self.run_SourcePlacement)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_source_placement)
-        self.menu.addAction(self.action_source_placement)
         self.plugin_actions.append(self.action_source_placement)
 
         # Tool: Pipe topology
@@ -178,8 +162,6 @@ class QThermonetPlugin(object):
             QIcon(icon_pipe_topology),
             u"Pipe Topology", self.iface.mainWindow())
         self.action_pipe_topology.triggered.connect(self.run_PipeTopology)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_pipe_topology)
-        self.menu.addAction(self.action_pipe_topology)
         self.plugin_actions.append(self.action_pipe_topology)
         
         # Tool: Full dimensioning
@@ -189,17 +171,13 @@ class QThermonetPlugin(object):
             QIcon(icon_full_dimensioning),
             u"Full Dimensioning", self.iface.mainWindow())
         self.action_full_dimensioning.triggered.connect(self.run_FullDimensioning)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_full_dimensioning)
-        self.menu.addAction(self.action_full_dimensioning)
         self.plugin_actions.append(self.action_full_dimensioning)
 
-        # Tool: Build pipe network (at the bottom for now; Part 8 reorders the menu)
+        # Tool: Build pipe network
         self.action_build_pipe_network = QAction(
             QIcon(utils.get_logo('logo6-pipes-simple.png')),
             u"Build Pipe Network", self.iface.mainWindow())
         self.action_build_pipe_network.triggered.connect(self.run_BuildPipeNetwork)
-        self.iface.addPluginToMenu(u"&QThermonet", self.action_build_pipe_network)
-        self.menu.addAction(self.action_build_pipe_network)
         self.plugin_actions.append(self.action_build_pipe_network)
 
         # # Tool: Run pythermonet
@@ -212,13 +190,43 @@ class QThermonetPlugin(object):
         # self.menu.addAction(self.action_qpythermonet)
         # self.plugin_actions.append(self.action_qpythermonet)
         
-        # Add toolbar icons for quick access to the tools
+        # The QThermonet menu, in workflow order: buildings and heat loads,
+        # network, dimensioning, then the individual pipe network steps (for
+        # re-running one step after a manual fix). Only this top-level menu --
+        # not also under Plugins (user 2026-10-02; one menu to keep in sync).
+        for action in (
+            self.action_get_buildings,
+            self.action_toggle_thermonet,
+            self.action_load_calculation,
+        ):
+            self.menu.addAction(action)
+        self.menu.addSeparator()
+        for action in (self.action_source_placement, self.action_build_pipe_network):
+            self.menu.addAction(action)
+        self.menu.addSeparator()
+        for action in (
+            self.action_ground_conductivity,
+            self.action_settings_editor,
+            self.action_full_dimensioning,
+        ):
+            self.menu.addAction(action)
+        self.menu.addSeparator()
+        steps_menu = self.menu.addMenu("Pipe network steps")
+        for action in (
+            self.action_main_pipe_hierarchy,
+            self.action_service_pipes,
+            self.action_pipe_topology,
+        ):
+            steps_menu.addAction(action)
+
+        # Add toolbar icons for quick access to the tools -- the main workflow
+        # only; the individual pipe network steps are in the menu's submenu
         self.iface.addToolBarIcon(self.action_get_buildings)
         self.iface.addToolBarIcon(self.action_toggle_thermonet)
         self.iface.addToolBarIcon(self.action_load_calculation)
         # self.iface.addToolBarIcon(self.action_aggregated_load)
-        self.iface.addToolBarIcon(self.action_service_pipes)
-        self.iface.addToolBarIcon(self.action_pipe_topology)
+        self.iface.addToolBarIcon(self.action_source_placement)
+        self.iface.addToolBarIcon(self.action_build_pipe_network)
         self.iface.addToolBarIcon(self.action_full_dimensioning)
         # self.iface.addToolBarIcon(self.action_qpythermonet)
     
@@ -228,18 +236,16 @@ class QThermonetPlugin(object):
         # Clean up all actions via the tracked list
         for action in self.plugin_actions:
             try:
-                self.iface.removePluginMenu(u"&QThermonet", action)
                 self.iface.removeToolBarIcon(action)
             except RuntimeError:
                 pass
-    
-        # Remove the menu
+
+        # Remove the menu (with its separators and the steps submenu)
         if hasattr(self, 'menu') and self.menu:
             try:
-                for action in self.plugin_actions:
-                    self.menu.removeAction(action)
                 menu_bar = self.iface.mainWindow().menuBar()
                 menu_bar.removeAction(self.menu.menuAction())
+                self.menu.deleteLater()
             except RuntimeError:
                 pass
     

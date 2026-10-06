@@ -711,7 +711,7 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         return self.tr(self.groupId())
 
     def groupId(self):
-        return '2. Thermonet'
+        return '4. Pipe network steps'
 
 
     def tr(self, string):

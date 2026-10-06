@@ -492,7 +492,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         contain lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return '2. Thermonet'
+        return '4. Pipe network steps'
 
 
     def tr(self, string):

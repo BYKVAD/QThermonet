@@ -627,7 +627,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         contain lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return '2. Thermonet'
+        return '3. Dimensioning'
 
     def flags(self):
         # matplotlib plotting isn't thread-safe in a Qt app; force this

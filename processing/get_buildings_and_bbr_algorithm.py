@@ -681,7 +681,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         Returns the translated algorithm name, which should be used for any
         user-visible display of the algorithm name.
         """
-        return self.tr('Get Buildings and BBR Information')
+        return self.tr('Get Buildings and Roads')
 
     def group(self):
         """
