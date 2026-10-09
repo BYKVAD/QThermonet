@@ -319,8 +319,8 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         
         feedback.pushInfo("Saving to output geojson file...")
         # Use filtered_features for saving the GeoJSON
-        self.save_to_geojson(updated_fields, filtered_features, 
-                             output_path, input_layer, feedback)
+        self.save_to_geojson(updated_fields, filtered_features,
+                             output_path, input_layer)
 
         # self.save_to_geojson(updated_fields, updated_features, 
         #                      output_path, input_layer, feedback)
@@ -368,15 +368,14 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo("Processing completed successfully.")
 
 
-    def save_to_geojson(self, fields, updated_features, output_path, input_layer, feedback):
+    def save_to_geojson(self, fields, updated_features, output_path, input_layer):
         """
         Saves updated features with new fields to a GeoJSON file.
-    
+
         :param fields: QgsFields containing the updated field definitions.
         :param updated_features: The list of updated QgsFeature.
         :param output_path: Path to save the output GeoJSON.
         :param input_layer: The input layer for CRS and geometry type.
-        :param feedback: Feedback object for progress reporting.
         """
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "GeoJSON"  # Specify GeoJSON driver
@@ -411,8 +410,6 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         error_code = error[0] if isinstance(error, tuple) else error
         if error_code != QgsVectorFileWriter.NoError:
             raise QgsProcessingException("Failed to create output GeoJSON.")
-
-        feedback.pushInfo(f"Output GeoJSON saved to: {output_path}")
         
 
     def calc_heat_loads(self, BuildYear_values, BuildCode_values, BBRArea_values, Thermonet, feedback):
