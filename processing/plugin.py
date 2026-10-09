@@ -219,24 +219,31 @@ class QThermonetPlugin(object):
         ):
             steps_menu.addAction(action)
 
-        # Add toolbar icons for quick access to the tools -- the main workflow
-        # only; the individual pipe network steps are in the menu's submenu
-        self.iface.addToolBarIcon(self.action_get_buildings)
-        self.iface.addToolBarIcon(self.action_toggle_thermonet)
-        self.iface.addToolBarIcon(self.action_load_calculation)
-        # self.iface.addToolBarIcon(self.action_aggregated_load)
-        self.iface.addToolBarIcon(self.action_source_placement)
-        self.iface.addToolBarIcon(self.action_build_pipe_network)
-        self.iface.addToolBarIcon(self.action_full_dimensioning)
+        # Own toolbar, not QGIS's shared Plugins toolbar (which also holds the
+        # Python console and other plugins' icons). The object name lets QGIS
+        # remember where the user put it. Main workflow only; the individual
+        # pipe network steps are in the menu's submenu.
+        self.toolbar = self.iface.addToolBar("QThermonet")
+        self.toolbar.setObjectName("QThermonetToolbar")
+        for action in (
+            self.action_get_buildings,
+            self.action_toggle_thermonet,
+            self.action_load_calculation,
+            self.action_source_placement,
+            self.action_build_pipe_network,
+            self.action_full_dimensioning,
+        ):
+            self.toolbar.addAction(action)
         # self.iface.addToolBarIcon(self.action_qpythermonet)
     
     def unload(self):
         utils.disconnect_project_signals()
 
-        # Clean up all actions via the tracked list
-        for action in self.plugin_actions:
+        # Remove the toolbar
+        if hasattr(self, 'toolbar') and self.toolbar:
             try:
-                self.iface.removeToolBarIcon(action)
+                self.iface.mainWindow().removeToolBar(self.toolbar)
+                self.toolbar.deleteLater()
             except RuntimeError:
                 pass
 
