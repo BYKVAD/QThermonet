@@ -88,7 +88,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         param.setHelp(
             "The service pipes layer must:\n"
             "- contain the service pipes connecting the heatpumps to the main thermonet pipes.\n"
-            "- Contain the heatpump ID's of the heatpumps in field with name 'id.lokalId' \n"
+            "- Contain the heatpump ID's of the heatpumps in field with name 'id_lokalId' \n"
             "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
         )
 
@@ -231,7 +231,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature["Trace_(m)"] = Trace_length
             new_feature["Number_of_traces"] = 1
             new_feature["Max_pressure_loss_(Pa)"] = 180 * Trace_length
-            new_feature["HP_ID_vector"] = feature["id.lokalId"]
+            new_feature["HP_ID_vector"] = feature["id_lokalId"]
             writer.addFeature(new_feature)
             
             # Update dat file
@@ -307,11 +307,11 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             # Collect IDs of the nearby service pipes
             connected_ids = []
             for f in nearby_service_pipes:
-                if "id.lokalId" in f.fields().names():
-                    connected_ids.append(f["id.lokalId"])
-                    feedback.pushInfo(f"Service pipe ID found: {f['id.lokalId']}")
+                if "id_lokalId" in f.fields().names():
+                    connected_ids.append(f["id_lokalId"])
+                    feedback.pushInfo(f"Service pipe ID found: {f['id_lokalId']}")
                 else:
-                    feedback.pushInfo("Field 'id.lokalId' not found in feature.")
+                    feedback.pushInfo("Field 'id_lokalId' not found in feature.")
                     
             # Combine IDs into a comma-separated string
             combined_ids = ", ".join(connected_ids)
@@ -460,7 +460,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             "ID's are connected to which pipe segment<p> "
             "<p> 2. A service pipes layer containing the service "
             "pipes connecting each building/heatpump to the thermonet. "
-            "This layer should hold the ID's of the heatpumps in a field called 'id.lokalId'. <p> "                
+            "This layer should hold the ID's of the heatpumps in a field called 'id_lokalId'. <p> "                
             " The tool stores the relevant information in new geojson and dat files. <p>"
             "<p> The output dat-file can be used as input for full "
             "dimensioning of the thermonet using pythermonet <p>"
