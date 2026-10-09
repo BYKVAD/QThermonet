@@ -71,6 +71,16 @@ pts_web = sp._read_connection_geometry(bhe_path, WEB)
 check("BHE: transformed to EPSG:3857",
       bool(pts_web) and 1.0e6 < pts_web[0].x() < 1.2e6 and 7.5e6 < pts_web[0].y() < 7.6e6)
 
+# BHE mirror: at rotation 0 the columns go below (south of) the first
+# borehole by default, above (north) when mirrored; rows are unaffected.
+for mirror, sign in ((False, -1), (True, 1)):
+    pts = sp._generate_grid_points(node, sp._GridParameters(
+        n_rows=2, n_cols=2, spacing_row=15, spacing_col=10, rotation=0, mirror_left=mirror))
+    check(f"BHE mirror={mirror}: first borehole on the node", close(pts[0].x(), node.x(), 1e-6) and close(pts[0].y(), node.y(), 1e-6))
+    check(f"BHE mirror={mirror}: second column {'above' if mirror else 'below'} the first borehole",
+          close(pts[1].x(), node.x(), 1e-6) and close(pts[1].y(), node.y() + sign * 10, 1e-6))
+    check(f"BHE mirror={mirror}: second row still east", close(pts[2].x(), node.x() + 15, 1e-6) and close(pts[2].y(), node.y(), 1e-6))
+
 check("missing file -> None", sp._read_connection_geometry(os.path.join(d, "nope.geojson"), UTM) is None)
 check("empty path -> None", sp._read_connection_geometry("", UTM) is None)
 

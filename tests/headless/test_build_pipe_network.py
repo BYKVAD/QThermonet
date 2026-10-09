@@ -9,6 +9,7 @@ changes no files.
 from __future__ import annotations
 
 import os
+import shutil
 
 import _harness
 from _harness import check
@@ -23,6 +24,7 @@ from qgis.core import (
     QgsProcessingException,
     QgsProcessingFeedback,
     QgsProject,
+    QgsVectorLayer,
     QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QMetaType
@@ -87,9 +89,13 @@ class Collect(QgsProcessingFeedback):
     def __init__(self):
         super().__init__()
         self.errors = []
+        self.infos = []
 
     def reportError(self, error, fatalError=False):
         self.errors.append(error)
+
+    def pushInfo(self, info):
+        self.infos.append(info)
 
 
 d = _harness.temp_dir()
@@ -116,13 +122,24 @@ outputs = {
 LAYER_NAMES = ("Main pipe hierarchy", "Service pipes", "Pipe topology")
 
 
-def params(roads="roads.geojson", buildings="buildings.geojson"):
+def params(roads="roads.geojson", buildings="buildings.geojson", crop=True, crop_mains=False):
     return {
         "PIPES_LAYER": inputs[roads],
         "SOURCE_LAYER": inputs["source.geojson"],
         "BUILDINGS_LAYER": inputs[buildings],
+        "CROP_NETWORK": crop,
+        "CROP_MAINS_FILE": crop_mains,
         **outputs,
     }
+
+
+def total_length(path, prefix=None):
+    """Sum of planar lengths in a line file (optionally only rows whose Section starts with `prefix`)."""
+    layer = QgsVectorLayer(path, "lengths", "ogr")
+    return sum(
+        f.geometry().length() for f in layer.getFeatures()
+        if prefix is None or str(f["Section"]).startswith(prefix)
+    )
 
 
 def snapshot():
@@ -170,10 +187,11 @@ check(f"re-run: no errors {fb.errors}", not fb.errors)
 check("re-run: same layers kept (IDs unchanged, no new layers)", layer_ids() == ids_before)
 check("re-run: no temp folder left", no_temp_left())
 
-# 3. Step 3 fails (stub pipe): mains + service pipes updated, topology untouched.
+# 3. Step 3 fails (stub pipe, cropping off -- today's behaviour): mains +
+#    service pipes updated, topology untouched.
 before = snapshot()
 fb = Collect()
-processing.run("QThermonet:build_pipe_network", params(roads="roads_stub.geojson"), feedback=fb)
+processing.run("QThermonet:build_pipe_network", params(roads="roads_stub.geojson", crop=False), feedback=fb)
 after = snapshot()
 summary = "\n".join(fb.errors)
 check("step 3 failure: reported with step name", "Step 3 of 3 (Pipe Topology) failed" in summary)
@@ -234,7 +252,121 @@ check(f"no heat pump IDs: rejected up front ({raised.splitlines()[-1] if raised 
       "id_lokalId" in raised and "heat pump IDs" in raised)
 check("no heat pump IDs: no files changed", snapshot() == before)
 
-# 7. Cancel: nothing changes.
+# 7. Lengths are ellipsoidal metres, also when the data is in EPSG:3857
+#    (a planar $length there is ~1.78x too long in Denmark).
+d_3857 = os.path.join(d, "epsg3857")
+os.makedirs(d_3857)
+inputs_3857 = {}
+for name in ("roads.geojson", "source.geojson", "buildings.geojson"):
+    inputs_3857[name] = os.path.join(d_3857, "in_" + name)
+    processing.run("native:reprojectlayer", {
+        "INPUT": inputs[name], "TARGET_CRS": "EPSG:3857", "OUTPUT": inputs_3857[name]})
+outputs_3857 = {key: os.path.join(d_3857, os.path.basename(path)) for key, path in outputs.items()}
+fb = Collect()
+# Cropping off in both runs: which corner of a building's edge (parallel to
+# the pipe) Service Pipes ties in at can differ after reprojection -- this
+# scenario tests length measurement only.
+processing.run("QThermonet:build_pipe_network", {
+    "PIPES_LAYER": inputs_3857["roads.geojson"],
+    "SOURCE_LAYER": inputs_3857["source.geojson"],
+    "BUILDINGS_LAYER": inputs_3857["buildings.geojson"],
+    "CROP_NETWORK": False,
+    **outputs_3857,
+}, feedback=fb)
+check(f"EPSG:3857 run: no errors {fb.errors}", not fb.errors)
+# Reference: the same network in EPSG:25832 (UTM -- planar ~ true there)
+d_25832 = os.path.join(d, "epsg25832")
+os.makedirs(d_25832)
+outputs_25832 = {key: os.path.join(d_25832, os.path.basename(path)) for key, path in outputs.items()}
+processing.run("QThermonet:build_pipe_network", {**params(crop=False), **outputs_25832}, feedback=Collect())
+
+
+def main_lengths(dat_path):
+    with open(dat_path, encoding="utf-8") as f:
+        rows = [line.split("\t") for line in f.read().splitlines()[1:]]
+    return sorted(float(row[2]) for row in rows if row[0].startswith("Pipe_branch"))
+
+
+lengths_3857, lengths_25832 = main_lengths(outputs_3857["TOPOLOGY_DAT_OUTPUT"]), main_lengths(outputs_25832["TOPOLOGY_DAT_OUTPUT"])
+check(f"EPSG:3857 run: main pipe lengths match the EPSG:25832 run {lengths_3857} vs {lengths_25832}",
+      len(lengths_3857) == len(lengths_25832) == 2
+      and all(abs(a - b) < 0.05 for a, b in zip(lengths_3857, lengths_25832)))
+
+# 8. EPSG:3857 input is reprojected into the project's metric CRS.
+project = QgsProject.instance()
+for project_crs, expected in (("EPSG:25832", "EPSG:25832"), ("EPSG:3857", "EPSG:3857"), ("EPSG:4326", "EPSG:3857")):
+    project.setCrs(QgsCoordinateReferenceSystem(project_crs))
+    check(f"project_crs_choice() in a {project_crs} project -> {expected}", utils.project_crs_choice() == expected)
+project.setCrs(QgsCoordinateReferenceSystem("EPSG:25832"))
+d_reproj = os.path.join(d, "reprojected")
+os.makedirs(d_reproj)
+outputs_reproj = {key: os.path.join(d_reproj, os.path.basename(path)) for key, path in outputs.items()}
+fb = Collect()
+processing.run("QThermonet:build_pipe_network", {
+    "PIPES_LAYER": inputs_3857["roads.geojson"],
+    "SOURCE_LAYER": inputs_3857["source.geojson"],
+    "BUILDINGS_LAYER": inputs_3857["buildings.geojson"],
+    **outputs_reproj,
+}, feedback=fb)
+check(f"3857 input, 25832 project: no errors {fb.errors}", not fb.errors)
+for key in ("MAINS_OUTPUT", "SERVICE_PIPES_OUTPUT", "TOPOLOGY_OUTPUT"):
+    crs = QgsVectorLayer(outputs_reproj[key], "check", "ogr").crs().authid()
+    check(f"3857 input, 25832 project: {os.path.basename(outputs_reproj[key])} written in {crs}", crs == "EPSG:25832")
+
+# 9. Cropping on (the default): the stub is removed and the run succeeds;
+#    the main pipe hierarchy file keeps it ("also crop" is off).
+d_crop = os.path.join(d, "crop")
+os.makedirs(d_crop)
+outputs_crop = {key: os.path.join(d_crop, os.path.basename(path)) for key, path in outputs.items()}
+fb = Collect()
+processing.run("QThermonet:build_pipe_network", {**params(roads="roads_stub.geojson"), **outputs_crop}, feedback=fb)
+check(f"cropping: stub network runs without errors {fb.errors}", not fb.errors)
+check("cropping: the stub's removal is reported",
+      any("Removed a main pipe without heat pumps" in info for info in fb.infos))
+topology_mains = total_length(outputs_crop["TOPOLOGY_OUTPUT"], "Pipe_branch")
+mains_file = total_length(outputs_crop["MAINS_OUTPUT"])
+check(f"cropping: topology is cropped, mains file isn't ({topology_mains:.1f} m vs {mains_file:.1f} m)",
+      mains_file > topology_mains + 19.9)
+
+# 10. "Also crop the main pipe hierarchy file": the mains file matches the topology.
+d_crop_mains = os.path.join(d, "crop_mains")
+os.makedirs(d_crop_mains)
+outputs_crop_mains = {key: os.path.join(d_crop_mains, os.path.basename(path)) for key, path in outputs.items()}
+fb = Collect()
+processing.run("QThermonet:build_pipe_network",
+               {**params(roads="roads_stub.geojson", crop_mains=True), **outputs_crop_mains}, feedback=fb)
+check(f"crop mains file: no errors {fb.errors}", not fb.errors)
+cropped_mains = total_length(outputs_crop_mains["MAINS_OUTPUT"])
+cropped_topology = total_length(outputs_crop_mains["TOPOLOGY_OUTPUT"], "Pipe_branch")
+check(f"crop mains file: mains file cropped like the topology ({cropped_mains:.2f} vs {cropped_topology:.2f} m)",
+      abs(cropped_mains - cropped_topology) < 0.01)
+check("crop mains file: no temp folder left", not os.path.exists(os.path.join(d_crop_mains, ".qthermonet-tmp")))
+
+# 11. Standalone Pipe Topology with "also crop": the main pipes input file
+#     itself is cropped, its loaded layer kept.
+d_standalone = os.path.join(d, "standalone")
+os.makedirs(d_standalone)
+mains_copy = os.path.join(d_standalone, "main_pipe_hierarchy.geojson")
+shutil.copy(outputs_crop["MAINS_OUTPUT"], mains_copy)  # uncropped, with the stub
+mains_layer = QgsVectorLayer(mains_copy, "Standalone mains", "ogr")
+project.addMapLayer(mains_layer)
+mains_layer_id = mains_layer.id()
+fb = Collect()
+processing.run("QThermonet:pipe_topology", {
+    "PIPES_LAYER": mains_layer,
+    "SERVICE_PIPES_LAYER": outputs_crop["SERVICE_PIPES_OUTPUT"],
+    "SOURCE_LAYER": inputs["source.geojson"],
+    "CROP_NETWORK": True,
+    "CROP_MAINS_FILE": True,
+    "OUTPUT": os.path.join(d_standalone, "pipe_topology.geojson"),
+    "DAT_OUTPUT": os.path.join(d_standalone, "pipe_topology.dat"),
+}, feedback=fb)
+check(f"standalone crop mains: no errors {fb.errors}", not fb.errors)
+check(f"standalone crop mains: input file cropped ({total_length(mains_copy):.2f} m)",
+      abs(total_length(mains_copy) - topology_mains) < 0.01)
+check("standalone crop mains: same layer kept", project.mapLayer(mains_layer_id) is not None)
+
+# 12. Cancel: nothing changes.
 before = snapshot()
 fb = Collect()
 fb.cancel()

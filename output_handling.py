@@ -263,6 +263,7 @@ class _FileEntry:
     layer_name: str | None
     cache_roles: tuple[str, ...]
     style_default: Callable[[QgsVectorLayer], None] | None
+    path_replacement: str | None = None
 
 
 @dataclass
@@ -328,6 +329,42 @@ class OutputSet:
             _FileEntry(path_real, path_temp, layer_name, tuple(cache_roles), style_default)
         )
         return path_temp
+
+    def add_replacement(self, path_real: str) -> str:
+        """A second temp path for a registered output; if written, it's committed instead.
+
+        For a later step that rewrites an earlier step's output while that
+        output's temp file is still open (e.g. Build Pipe Network's Pipe
+        Topology cropping the main pipes it was given as a layer): the
+        rewrite goes to this path, so the open file needn't be replaced.
+
+        Parameters
+        ----------
+        path_real : str
+            The real path the output was registered under with `add_file`.
+
+        Returns
+        -------
+        str
+            The replacement temp path, or `path_real` in step mode.
+
+        Raises
+        ------
+        ValueError
+            If `path_real` isn't a registered output.
+
+        """
+        if self.step_mode:
+            return path_real
+        target = normalize_path(path_real)
+        for entry in self._files:
+            if normalize_path(entry.path_real) == target:
+                folder, name = os.path.split(entry.path_temp)
+                entry.path_replacement = os.path.join(folder, "replacement_" + name)
+                if os.path.isfile(entry.path_replacement):
+                    os.remove(entry.path_replacement)  # crash leftover
+                return entry.path_replacement
+        raise ValueError(f"Not a registered output: {path_real}")
 
     def add_folder(self, path_real: str) -> str:
         """Register an output folder and get the folder to write into.
@@ -395,11 +432,12 @@ class OutputSet:
         # Best-effort: this runs while handling another failure, so it must
         # never raise itself (e.g. a failed writer still holding its file).
         for entry in self._files:
-            if os.path.isfile(entry.path_temp):
-                try:
-                    os.remove(entry.path_temp)
-                except OSError:
-                    pass
+            for path in (entry.path_temp, entry.path_replacement):
+                if path and os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
         for entry in self._folders:
             shutil.rmtree(entry.path_temp, ignore_errors=True)
         self._remove_empty_temp_folders()
@@ -475,8 +513,11 @@ class OutputSet:
             feedback.pushInfo(
                 f"{os.path.basename(entry.path_real)}: replacing {len(loaded)} loaded layer(s)"
             )
+        source = entry.path_temp
+        if entry.path_replacement and os.path.isfile(entry.path_replacement):
+            source = entry.path_replacement  # see add_replacement
         try:
-            _replace_or_flush_and_retry(entry.path_temp, entry.path_real)
+            _replace_or_flush_and_retry(source, entry.path_real)
         except OSError:
             # File unchanged -- point every layer back at it, as it was.
             self._reattach_layers(loaded)

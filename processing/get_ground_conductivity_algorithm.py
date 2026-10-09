@@ -89,7 +89,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             "tool's output (a BHE borefield point layer or an HHE trench line "
             "layer) -- any number of features is fine; the ground conductivity "
             "is computed at the combined centroid of all of them.\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
         self.addParameter(param)
 

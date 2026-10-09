@@ -42,7 +42,6 @@ from qgis.core import (
     QgsFields,
     QgsWkbTypes,
     QgsSpatialIndex,
-    QgsDistanceArea,
     QgsFeatureRequest,
     QgsField,
     QgsPointXY,
@@ -129,7 +128,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             "The input layer must:\n"
             "- Be a polygon layer (e.g., representing building footprints).\n"
             "- Contain the required fields: 'Thermonet' and 'BBRUUID'.\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -148,7 +147,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             "- Contain the required fields: 'id' and 'Level'.\n"
             "- The 'Level' field should contain the hierarchy of the pipes "
             "(integers 1:1:N, where 1=main pipe, N=lowest-level pipe).\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -228,11 +227,12 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         # case this tool is ever fed layers from elsewhere.
         default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
 
-        # Each layer independently escapes a geographic CRS first (both
-        # towards the same target, so they naturally agree afterwards)...
-        if buildings_layer.crs().isGeographic():
+        # Each layer independently escapes a non-metric CRS (degrees or
+        # EPSG:3857) first (both towards the same target, so they naturally
+        # agree afterwards)...
+        if utils.needs_metric_reprojection(buildings_layer.crs()):
             feedback.pushInfo(
-                f"Buildings layer is in geographic CRS ({buildings_layer.crs().authid()}), "
+                f"Buildings layer is not in metres ({buildings_layer.crs().authid()}), "
                 f"reprojecting to {default_projected_crs.authid()}"
             )
             buildings_layer = processing.run(
@@ -242,9 +242,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
                 feedback=feedback,
             )['OUTPUT']
 
-        if pipes_layer.crs().isGeographic():
+        if utils.needs_metric_reprojection(pipes_layer.crs()):
             feedback.pushInfo(
-                f"Pipes layer is in geographic CRS ({pipes_layer.crs().authid()}), "
+                f"Pipes layer is not in metres ({pipes_layer.crs().authid()}), "
                 f"reprojecting to {default_projected_crs.authid()}"
             )
             pipes_layer = processing.run(
@@ -325,10 +325,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo("Building spatial index for pipes...")
         spatial_index = QgsSpatialIndex(pipes_layer.getFeatures())
         
-        # Set up the distance calculator
-        distance_calculator = QgsDistanceArea()
-        distance_calculator.setSourceCrs(buildings_layer.sourceCrs(), context.transformContext())
-        distance_calculator.setEllipsoid(context.project().ellipsoid())
+        # On the data CRS's own ellipsoid, not the project's setting (which
+        # can be "NONE", i.e. planar in CRS units)
+        distance_calculator = utils.create_distance_area(buildings_layer.sourceCrs(), context.transformContext())
         
         # Process each building
         feedback.pushInfo("Finding shortest service pipe for each building...")

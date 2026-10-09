@@ -125,7 +125,7 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
             "The input layer must:\n"
             "- Be a polygon layer (shape or geojson format).\n"
             "- Contain a single polygon outlining the Area-Of-Interest.\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
         self.addParameter(param)
         #1st output

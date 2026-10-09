@@ -40,9 +40,6 @@ from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.core import (
                        QgsCoordinateTransform,
                        QgsCoordinateReferenceSystem,
-                       QgsExpression,
-                       QgsExpressionContext,
-                       QgsExpressionContextUtils,
                        QgsField,
                        QgsGeometry,
                        QgsLineSymbol,
@@ -136,6 +133,52 @@ def check_pipes_layer(pipes_layer):
     return True, ""
 
 
+def get_connection_node_geometry(source_layer):
+    """Extract the connection-node point from a Source Placement output layer.
+
+    Handles both output shapes Source Placement can produce: a BHE
+    borefield point layer, where the flagged feature's own geometry is
+    the connection node, and an HHE trench line layer, where the
+    flagged feature's `connection_node_end` attribute names which end
+    of that line is the connection node (a line's vertex order alone
+    isn't reliable -- see
+    `claude/handoffs/2026-09-17-hhe-source-placement-backlog.md`).
+    Shared by Main Pipe Hierarchy and Pipe Topology.
+
+    Parameters
+    ----------
+    source_layer : QgsVectorLayer
+        The selected source placement layer.
+
+    Returns
+    -------
+    QgsGeometry | None
+        The connection node as a point geometry, in `source_layer`'s CRS, or
+        `None` if the layer has no `is_connection_node` field or no feature
+        has it set.
+
+    """
+    field_names = [field.name() for field in source_layer.fields()]
+    if "is_connection_node" not in field_names:
+        return None
+    has_end_field = "connection_node_end" in field_names
+
+    for feature in source_layer.getFeatures():
+        if not feature["is_connection_node"]:
+            continue
+        geometry = feature.geometry()
+        if geometry.type() == QgsWkbTypes.PointGeometry:
+            return geometry
+        if geometry.type() == QgsWkbTypes.LineGeometry:
+            polyline = geometry.asPolyline()
+            end = feature["connection_node_end"] if has_end_field else "start"
+            point = polyline[0] if end == "start" else polyline[-1]
+            return QgsGeometry.fromPointXY(point)
+        return None
+
+    return None
+
+
 class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
     #Handle input/output
@@ -161,7 +204,7 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         param.setHelp(
             "The input pipes layer must:\n"
             "- include the main pipes of the thermonet"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -180,7 +223,7 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             "- must have an 'is_connection_node' attribute flagging the "
             "feature where the field connects to the distribution network "
             "(for a line layer, 'connection_node_end' names which end)\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -246,12 +289,10 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
         ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
         default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
-        def is_geographic(crs):
-            return crs.isGeographic()
-        
-        # Use the projected CRS of the input if it's already projected
-        if is_geographic(input_pipes_layer.crs()):
-            feedback.pushInfo(f"Pipes layer is in geographic CRS ({input_pipes_layer.crs().authid()}), reprojecting to {default_projected_crs.authid()}")
+
+        # Use the input's own CRS if it's metric (not degrees, not EPSG:3857)
+        if utils.needs_metric_reprojection(input_pipes_layer.crs()):
+            feedback.pushInfo(f"Pipes layer is not in metres ({input_pipes_layer.crs().authid()}), reprojecting to {default_projected_crs.authid()}")
             pipes_layer_proj = processing.run(
                 "native:reprojectlayer",
                 {
@@ -267,8 +308,8 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             pipes_layer_proj = input_pipes_layer
         
         # Do the same for source layer
-        if is_geographic(input_source_layer.crs()):
-            feedback.pushInfo(f"Source layer is in geographic CRS ({input_source_layer.crs().authid()}), reprojecting to {pipes_layer_proj.crs().authid()}")
+        if utils.needs_metric_reprojection(input_source_layer.crs()):
+            feedback.pushInfo(f"Source layer is not in metres ({input_source_layer.crs().authid()}), reprojecting to {pipes_layer_proj.crs().authid()}")
             source_layer_proj = processing.run(
                 "native:reprojectlayer",
                 {
@@ -345,22 +386,13 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             provider.addAttributes([QgsField(field_name, QMetaType.Type.Double)])
             split_pipes_layer.updateFields()
         
-        # Prepare the $length expression
-        expression = QgsExpression('$length')
-        expr_context = QgsExpressionContext()
-        expr_context.appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(split_pipes_layer))
-        
+        # Ellipsoidal, in metres -- a plain $length is planar in CRS units
+        distance_area = utils.create_distance_area(split_pipes_layer.crs(), context.transformContext())
+
         updated_features = {}
-        
+
         for feature in split_pipes_layer.getFeatures():
-            expr_context.setFeature(feature)  # Set the feature for evaluation
-            ellip_length = expression.evaluate(expr_context)  # Compute length
-            ellip_length = round(ellip_length, 1)
-        
-            if expression.hasEvalError():
-                feedback.pushInfo(f"Feature {feature.id()} - ERROR: {expression.evalErrorString()}")
-                continue
-        
+            ellip_length = round(distance_area.measureLength(feature.geometry()), 1)
             utils.raise_if_nan(ellip_length, "a pipe length")
             updated_features[feature.id()] = {provider.fieldNameIndex(field_name): ellip_length}
         
@@ -399,7 +431,6 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
 
         
         # Step 5: Dissolve pipe features based on level
-        expr_context = QgsExpressionContext()
         pipes_dissolved_on_level = processing.run(
             "native:dissolve", 
             {
@@ -420,22 +451,12 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             provider.addAttributes([QgsField(field_name, QMetaType.Type.Double)])
             pipes_layer.updateFields()
         
-        # Prepare the $length expression
-        expression = QgsExpression('$length')
-        expr_context = QgsExpressionContext()
-        expr_context.appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(pipes_layer))
-        
+        distance_area = utils.create_distance_area(pipes_layer.crs(), context.transformContext())
+
         updated_features = {}
-        
+
         for feature in pipes_layer.getFeatures():
-            expr_context.setFeature(feature)  # Set the feature for evaluation
-            ellip_length = expression.evaluate(expr_context)  # Compute length
-            ellip_length = round(ellip_length, 1)
-        
-            if expression.hasEvalError():
-                feedback.pushInfo(f"Feature {feature.id()} - ERROR: {expression.evalErrorString()}")
-                continue
-        
+            ellip_length = round(distance_area.measureLength(feature.geometry()), 1)
             utils.raise_if_nan(ellip_length, "a pipe length")
             updated_features[feature.id()] = {provider.fieldNameIndex(field_name): ellip_length}
         
@@ -493,7 +514,7 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
         else:
             transform = None
 
-        source_geom = self.get_connection_node_geometry(source_layer_proj)
+        source_geom = get_connection_node_geometry(source_layer_proj)
         if source_geom is None:
             return None  # No connection-node feature found
 
@@ -535,48 +556,6 @@ class MainPipeHierarchyAlgorithm(QgsProcessingAlgorithm):
             )
         return closest_feature_id  # Return the ID of the root pipe
 
-    def get_connection_node_geometry(self, source_layer):
-        """Extract the connection-node point from a Source Placement output layer.
-
-        Handles both output shapes Source Placement can produce: a BHE
-        borefield point layer, where the flagged feature's own geometry is
-        the connection node, and an HHE trench line layer, where the
-        flagged feature's `connection_node_end` attribute names which end
-        of that line is the connection node (a line's vertex order alone
-        isn't reliable -- see
-        `claude/handoffs/2026-09-17-hhe-source-placement-backlog.md`).
-
-        Parameters
-        ----------
-        source_layer : QgsVectorLayer
-            The selected source placement layer.
-
-        Returns
-        -------
-        QgsGeometry | None
-            The connection node as a point geometry, or `None` if the layer
-            has no `is_connection_node` field or no feature has it set.
-
-        """
-        field_names = [field.name() for field in source_layer.fields()]
-        if "is_connection_node" not in field_names:
-            return None
-        has_end_field = "connection_node_end" in field_names
-
-        for feature in source_layer.getFeatures():
-            if not feature["is_connection_node"]:
-                continue
-            geometry = feature.geometry()
-            if geometry.type() == QgsWkbTypes.PointGeometry:
-                return geometry
-            if geometry.type() == QgsWkbTypes.LineGeometry:
-                polyline = geometry.asPolyline()
-                end = feature["connection_node_end"] if has_end_field else "start"
-                point = polyline[0] if end == "start" else polyline[-1]
-                return QgsGeometry.fromPointXY(point)
-            return None
-
-        return None
     
     def assign_levels(self, split_pipes_layer, root_pipe_id, feedback):
         """

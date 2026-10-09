@@ -10,6 +10,7 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingMultiStepFeedback,
+    QgsProcessingParameterBoolean,
     QgsProcessingParameterFileDestination,
     QgsProcessingParameterVectorLayer,
     QgsVectorLayer,
@@ -37,6 +38,8 @@ class BuildPipeNetworkAlgorithm(QgsProcessingAlgorithm):
     PIPES_LAYER = "PIPES_LAYER"
     SOURCE_LAYER = "SOURCE_LAYER"
     BUILDINGS_LAYER = "BUILDINGS_LAYER"
+    CROP_NETWORK = "CROP_NETWORK"
+    CROP_MAINS_FILE = "CROP_MAINS_FILE"
     MAINS_OUTPUT = "MAINS_OUTPUT"
     SERVICE_PIPES_OUTPUT = "SERVICE_PIPES_OUTPUT"
     TOPOLOGY_OUTPUT = "TOPOLOGY_OUTPUT"
@@ -87,6 +90,26 @@ class BuildPipeNetworkAlgorithm(QgsProcessingAlgorithm):
             "are connected) and 'id_lokalId' (the heat pump IDs) -- e.g. the Get "
             "Buildings or Heat Loads output. The IDs must match the heat pump IDs "
             "in the heat loads file used for Full Dimensioning."
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(
+            self.CROP_NETWORK, "Remove main pipes without heat pumps", defaultValue=True
+        )
+        param.setHelp(
+            "Removes main pipes with no heat pumps on them or downstream, and trims "
+            "the end of a pipe past its last connection -- such pipes carry no flow. "
+            "Unticked, a main pipe without heat pumps stops the Pipe Topology step."
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(
+            self.CROP_MAINS_FILE, "Also crop the main pipe hierarchy file", defaultValue=False
+        )
+        param.setHelp(
+            "Also writes the cropped main pipes to the main pipe hierarchy output. "
+            "Unticked, only the topology outputs are cropped, so comparing the two "
+            "layers shows what was removed."
         )
         self.addParameter(param)
 
@@ -235,6 +258,13 @@ class BuildPipeNetworkAlgorithm(QgsProcessingAlgorithm):
                 cache_roles=["topology_dat_file"],
             ),
         }
+        # Cropped main pipes go to a second temp file: step 1's is still open
+        # as the layer handed to step 3 (see add_replacement).
+        self._cropped_mains_temp = None
+        if self.parameterAsBoolean(parameters, self.CROP_NETWORK, context) and self.parameterAsBoolean(
+            parameters, self.CROP_MAINS_FILE, context
+        ):
+            self._cropped_mains_temp = self._outputs.add_replacement(paths_real[self.MAINS_OUTPUT])
         # Intermediate results are passed on as layer objects this tool owns,
         # not as paths: a child given a path loads it into the context's
         # layer store, which keeps the temp file locked until after commit
@@ -265,6 +295,13 @@ class BuildPipeNetworkAlgorithm(QgsProcessingAlgorithm):
                     if index == 0:
                         raise QgsProcessingException(message + "\nNo files were changed.") from exc
                     self._failure = (index, step_name, str(exc))
+                    # Step 3 writes the cropped mains before it can still fail --
+                    # keep step 1's uncropped result then.
+                    if self._cropped_mains_temp and os.path.isfile(self._cropped_mains_temp):
+                        try:
+                            os.remove(self._cropped_mains_temp)
+                        except OSError:
+                            pass
                     for _, _, later_outputs in self.STEPS[index:]:
                         for name in later_outputs:
                             self._outputs.drop(paths_real[name])
@@ -367,6 +404,10 @@ class BuildPipeNetworkAlgorithm(QgsProcessingAlgorithm):
         return {
             "PIPES_LAYER": intermediates[self.MAINS_OUTPUT],
             "SERVICE_PIPES_LAYER": intermediates[self.SERVICE_PIPES_OUTPUT],
+            "SOURCE_LAYER": parameters[self.SOURCE_LAYER],
+            "CROP_NETWORK": parameters.get(self.CROP_NETWORK, True),
+            "CROP_MAINS_FILE": self._cropped_mains_temp is not None,
+            "CROPPED_MAINS_OUTPUT": self._cropped_mains_temp,
             "OUTPUT": paths_temp[self.TOPOLOGY_OUTPUT],
             "DAT_OUTPUT": paths_temp[self.TOPOLOGY_DAT_OUTPUT],
             "RUN_AS_STEP": True,

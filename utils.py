@@ -381,7 +381,7 @@ def _current_project_key() -> str:
 #: Per-project, in-memory, session-lifetime cache -- reset on plugin
 #: reload/QGIS restart, never persisted directly. Each project's slot is
 #: `{"settings_path": str | None, "pending": dict[str, str],
-#: "setup_asked": bool, "crs_choice": str}`:
+#: "setup_asked": bool}`:
 #:
 #: - `settings_path` is the settings file currently active for that
 #:   project, or `None` if none has been opened/created yet this session.
@@ -394,10 +394,9 @@ def _current_project_key() -> str:
 #:   deliberately no in-memory mirror of settings-file-backed roles, so
 #:   there is nothing to go stale or need clearing when the active settings
 #:   file changes.
-#: - `setup_asked`/`crs_choice`: see `maybe_prompt_project_setup` below --
-#:   deliberately session-cached, not settings-file-backed, since which CRS
-#:   to reproject into is a per-session QGIS/UX decision, not a physical
-#:   property of the thermonet design itself.
+#: - `setup_asked`: see `maybe_prompt_project_setup` below. (The CRS
+#:   choice isn't cached here: it's the project's own CRS, see
+#:   `project_crs_choice`.)
 #: - `overwrite_confirm_off`: see `overwrite_confirm_disabled` below.
 _session_cache: dict[str, dict] = {}
 
@@ -567,7 +566,7 @@ def _carry_session_over(old_key: str, new_key: str) -> None:
     new_slot["pending"] = {**old_slot.get("pending", {}), **new_slot.get("pending", {})}
     if new_slot.get("settings_path") is None and old_slot.get("settings_path"):
         new_slot["settings_path"] = old_slot["settings_path"]
-    for key in ("setup_asked", "crs_choice", "overwrite_confirm_off"):
+    for key in ("setup_asked", "overwrite_confirm_off"):
         if key in old_slot and key not in new_slot:
             new_slot[key] = old_slot[key]
 
@@ -748,7 +747,7 @@ _BORNHOLM_BBOX_WGS84 = (14.6, 54.9, 15.3, 55.35)   # (min_lon, min_lat, max_lon,
 _DENMARK_MAINLAND_BBOX_WGS84 = (8.0, 54.5, 13.0, 57.8)
 
 
-def _suggest_danish_crs(point_wgs84) -> tuple[str, str] | None:
+def suggest_danish_crs(point_wgs84) -> tuple[str, str] | None:
     """`(epsg_authid, region_label)` if `point_wgs84` falls in Denmark or
     Bornholm's rough bounding box, else `None`.
 
@@ -791,17 +790,14 @@ def maybe_prompt_project_setup(parent, crs=None, point=None, feedback=None) -> b
        rest of the session cache) actually persist for the project's
        lifetime rather than colliding with every other unsaved project.
     2. If `point` (in `crs`) falls in Denmark or Bornholm's rough bounding
-       box, asks whether to use the recommended UTM zone for reprojections
-       in QThermonet (`project_crs_choice()` reads the answer back).
-       Declining, being outside both boxes, or passing no `crs`/`point`
-       leaves the existing `EPSG:3857` fallback in place -- this never
-       changes any algorithm's behavior by itself, it only records a
-       preference for `project_crs_choice()` to be read later.
+       box, asks whether to set the project CRS to the recommended UTM zone
+       (`project_crs_choice()` then uses it for QThermonet's
+       reprojections). Declining, being outside both boxes, or passing no
+       `crs`/`point` leaves the project CRS as it is.
 
-    Both prompts require a GUI (skipped entirely, falling back to
-    `EPSG:3857`, when `qgis.utils.iface` is `None` -- e.g. running headless
-    via `qgis_process`) -- detection is a nicety, never something that
-    should block or fail an algorithm run.
+    Both prompts require a GUI (skipped entirely when `qgis.utils.iface` is
+    `None` -- e.g. running headless via `qgis_process`) -- detection is a
+    nicety, never something that should block or fail an algorithm run.
 
     Parameters
     ----------
@@ -889,8 +885,6 @@ def maybe_prompt_project_setup(parent, crs=None, point=None, feedback=None) -> b
                     slot["settings_path"] = old_slot["settings_path"]
             slot["setup_asked"] = True
 
-    slot.setdefault("crs_choice", "EPSG:3857")
-
     if crs is None or point is None:
         return just_saved
 
@@ -899,11 +893,13 @@ def maybe_prompt_project_setup(parent, crs=None, point=None, feedback=None) -> b
     wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
     transform = QgsCoordinateTransform(crs, wgs84, QgsProject.instance())
     center_wgs84 = transform.transform(point)
-    suggestion = _suggest_danish_crs(center_wgs84)
+    suggestion = suggest_danish_crs(center_wgs84)
     if suggestion is None:
         return just_saved
 
     epsg, region = suggestion
+    if QgsProject.instance().crs().authid() == epsg:
+        return just_saved  # already set (e.g. in an earlier session) -- don't ask again
     answer = QMessageBox.question(
         parent,
         "Coordinate system",
@@ -913,13 +909,51 @@ def maybe_prompt_project_setup(parent, crs=None, point=None, feedback=None) -> b
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
     )
     if answer == QMessageBox.StandardButton.Yes:
-        slot["crs_choice"] = epsg
-        # Not just an internal QThermonet preference -- the project's own
-        # display/map CRS should actually change too, so what's shown in
-        # QGIS matches what QThermonet reprojects into.
+        # The project CRS *is* QThermonet's choice (project_crs_choice reads
+        # it), so it's saved with the project and survives a restart.
         QgsProject.instance().setCrs(QgsCoordinateReferenceSystem(epsg))
 
     return just_saved
+
+
+def create_distance_area(crs, transform_context):
+    """An ellipsoidal distance calculator for data in `crs`, on its own ellipsoid.
+
+    For every length QThermonet writes to an output. A `$length` expression
+    without a calculator measures planar in CRS units -- 78 % too long in
+    EPSG:3857 in Denmark (headless check 2026-10-09). The data CRS's own
+    ellipsoid (e.g. GRS80 for EPSG:25832) is used rather than the project's
+    ellipsoid setting, which can be "NONE" (then measuring is planar again).
+
+    Parameters
+    ----------
+    crs : QgsCoordinateReferenceSystem
+        CRS of the geometries to measure.
+    transform_context : QgsCoordinateTransformContext
+        E.g. the Processing context's ``transformContext()``.
+
+    Returns
+    -------
+    QgsDistanceArea
+        Measures lengths and distances in metres on `crs`'s ellipsoid.
+
+    Raises
+    ------
+    QgsProcessingException
+        If `crs` has no usable ellipsoid.
+
+    """
+    from qgis.core import QgsDistanceArea, QgsProcessingException
+
+    ellipsoid = crs.ellipsoidAcronym()
+    distance_area = QgsDistanceArea()
+    distance_area.setSourceCrs(crs, transform_context)
+    if not ellipsoid or not distance_area.setEllipsoid(ellipsoid) or not distance_area.willUseEllipsoid():
+        raise QgsProcessingException(
+            f"Can't measure lengths in the coordinate system {crs.authid() or crs.description()}: "
+            "it has no ellipsoid. Use a standard projected coordinate system, e.g. EPSG:25832."
+        )
+    return distance_area
 
 
 def raise_if_nan(value, what: str) -> None:
@@ -1006,16 +1040,45 @@ def disable_overwrite_confirm() -> None:
 
 
 def project_crs_choice() -> str:
-    """The current project's recommended-CRS choice, cached this session.
+    """The CRS QThermonet reprojects into: the QGIS project's own, if metric.
+
+    Read from the project (saved in the ``.qgz``, so it survives a restart --
+    the Denmark prompt in `maybe_prompt_project_setup` sets it). A project
+    still in degrees or in EPSG:3857 isn't usable for metre thresholds, so
+    then the ``"EPSG:3857"`` last resort is returned.
 
     Returns
     -------
     str
-        An EPSG authid (e.g. ``"EPSG:25832"``), or the ``"EPSG:3857"``
-        fallback if `maybe_prompt_project_setup` hasn't run yet this
-        project, or the user declined/was outside Denmark and Bornholm.
+        The project CRS's authid (e.g. ``"EPSG:25832"``), or ``"EPSG:3857"``.
     """
-    return _project_slot().get("crs_choice", "EPSG:3857")
+    from qgis.core import QgsProject
+
+    crs = QgsProject.instance().crs()
+    if crs.isValid() and crs.authid() and not needs_metric_reprojection(crs):
+        return crs.authid()
+    return "EPSG:3857"
+
+
+def needs_metric_reprojection(crs) -> bool:
+    """Whether data in `crs` must be reprojected before metre-based work.
+
+    True for geographic CRSs (degrees) and for EPSG:3857, which stretches
+    distances ~1.8x in Denmark -- the tools' metre thresholds and Source
+    Placement's spacings would be off. Deliberately just these two cases
+    (user 2026-10-09: other distorting CRSs are unlikely here).
+
+    Parameters
+    ----------
+    crs : QgsCoordinateReferenceSystem
+        The CRS to check.
+
+    Returns
+    -------
+    bool
+        `True` if `crs` is geographic or EPSG:3857.
+    """
+    return crs.isGeographic() or crs.authid() == "EPSG:3857"
 
 
 def prepare_algorithm_project_setup(

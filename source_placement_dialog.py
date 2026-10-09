@@ -119,6 +119,12 @@ class _GridParameters:
     rotation : float
         Counter-clockwise rotation of the whole grid from its default
         orientation (rows west->east, columns north->south). # degrees
+    mirror_left : bool
+        `False` (default): columns run to the right of the first row
+        (north->south at rotation 0, i.e. below the first borehole). `True`:
+        to the left instead (south->north, above) -- a mirror reflection,
+        not reproducible by `rotation` alone. Same convention as
+        `_TrenchParameters.mirror_left`.
 
     """
 
@@ -127,6 +133,7 @@ class _GridParameters:
     spacing_row: float
     spacing_col: float
     rotation: float
+    mirror_left: bool = False
 
 
 def _generate_grid_points(origin: QgsPointXY, grid: _GridParameters) -> list[QgsPointXY]:
@@ -154,12 +161,13 @@ def _generate_grid_points(origin: QgsPointXY, grid: _GridParameters) -> list[Qgs
     """
     theta = math.radians(grid.rotation)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
+    column_sign = 1.0 if grid.mirror_left else -1.0
 
     points = []
     for row in range(grid.n_rows):
         for col in range(grid.n_cols):
             local_x = row * grid.spacing_row
-            local_y = -col * grid.spacing_col
+            local_y = column_sign * col * grid.spacing_col
             x = origin.x() + local_x * cos_t - local_y * sin_t
             y = origin.y() + local_x * sin_t + local_y * cos_t
             points.append(QgsPointXY(x, y))
@@ -928,6 +936,14 @@ class SourcePlacementDialog(QDialog):
             grid, "Rotation, CCW (°):", QDoubleSpinBox, -360.0, 360.0, _DEFAULT_ROTATION
         )
 
+        self._bhe_mirror_left_check = QCheckBox("Draw boreholes to the left")
+        self._bhe_mirror_left_check.setToolTip(
+            "Lays the columns out on the other side of the first row -- at rotation 0, "
+            "above the first borehole instead of below."
+        )
+        self._bhe_mirror_left_check.toggled.connect(self._regenerate_preview)
+        grid.addWidget(self._bhe_mirror_left_check)
+
         box.setLayout(grid)
         return box
 
@@ -936,7 +952,7 @@ class SourcePlacementDialog(QDialog):
         layout = QVBoxLayout()
 
         self._n_pipes_parallel_spin = self._add_spin_row(
-            layout, "N parallel pipes (2 × U-pipes):", QSpinBox, 2, 50, 2
+            layout, "N parallel pipes (2 × U-pipes):", QSpinBox, 2, 1000, 2
         )
         self._n_pipes_parallel_spin.setSingleStep(2)
         self._n_pipes_parallel_spin.setEnabled(False)
@@ -951,6 +967,7 @@ class SourcePlacementDialog(QDialog):
         self._pipe_spacing_spin = self._add_spin_row(
             layout, "Pipe spacing (m):", QDoubleSpinBox, 0.1, 100.0, 1.0
         )
+        self._pipe_spacing_spin.setSingleStep(0.1)
         self._pipe_spacing_spin.setEnabled(False)
 
         self._burial_depth_spin = self._add_spin_row(
@@ -1202,6 +1219,7 @@ class SourcePlacementDialog(QDialog):
             ):
                 if key in section:
                     spin.setValue(section[key])
+            self._bhe_mirror_left_check.setChecked(bool(section.get("mirror_left", False)))
 
         self._on_point_picked(node)
         self._set_status("Restored the previous placement -- pick a new node to move it.")
@@ -1306,9 +1324,58 @@ class SourcePlacementDialog(QDialog):
         self._canvas.setMapTool(self._point_tool if checked else self._pan_tool)
 
     def _on_point_picked(self, point: QgsPointXY) -> None:
-        self._connection_point = point
         self._pick_button.setChecked(False)
+        point = self._ensure_metric_map_crs(point)
+        if point is None:
+            return
+        self._connection_point = point
         self._regenerate_preview()
+
+    def _ensure_metric_map_crs(self, point: QgsPointXY) -> QgsPointXY | None:
+        """Make sure the map is in metres before placing; the point in the (new) map CRS, or None.
+
+        Spacings and lengths are applied in map units, so in degrees or
+        EPSG:3857 (~1.8x stretch in Denmark) the field would silently come
+        out the wrong size.
+        """
+        crs = self._canvas.mapSettings().destinationCrs()
+        if not utils.needs_metric_reprojection(crs):
+            return point
+
+        to_wgs84 = QgsCoordinateTransform(crs, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        suggestion = utils.suggest_danish_crs(to_wgs84.transform(point))
+        problem = (
+            f"The map uses {crs.authid() or crs.description()}, which isn't in metres "
+            "here. Spacings and lengths are applied in map units, so the field would "
+            "come out the wrong size."
+        )
+        if suggestion is None:
+            QMessageBox.warning(
+                self,
+                "Coordinate system",
+                f"{problem}\n\nSet the project to a projected coordinate system in "
+                "metres for your area (Project → Properties → CRS), then place the "
+                "connection node again.",
+            )
+            return None
+
+        epsg, region = suggestion
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Coordinate system")
+        box.setText(f"{problem}\n\nSwitch the project to {epsg}, recommended for {region}?")
+        switch_button = box.addButton("Switch", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not switch_button:
+            return None
+
+        new_crs = QgsCoordinateReferenceSystem(epsg)
+        QgsProject.instance().setCrs(new_crs)
+        # Only the CRS (the canvas transforms its own extent) -- a full
+        # _sync_canvas_to_project would also jump to the main window's view.
+        self._canvas.setDestinationCrs(new_crs)
+        return QgsCoordinateTransform(crs, new_crs, QgsProject.instance()).transform(point)
 
     def _regenerate_preview(self) -> None:
         self._rubber_band.reset(QgsWkbTypes.PointGeometry)
@@ -1336,6 +1403,7 @@ class SourcePlacementDialog(QDialog):
             spacing_row=self._spacing_row_spin.value(),
             spacing_col=self._spacing_col_spin.value(),
             rotation=self._rotation_spin.value(),
+            mirror_left=self._bhe_mirror_left_check.isChecked(),
         )
         self._points = _generate_grid_points(self._connection_point, grid)
         for point in self._points:
@@ -1435,6 +1503,7 @@ class SourcePlacementDialog(QDialog):
                     "spacing_row": self._spacing_row_spin.value(),
                     "spacing_col": self._spacing_col_spin.value(),
                     "rotation": self._rotation_spin.value(),
+                    "mirror_left": self._bhe_mirror_left_check.isChecked(),
                 }
                 utils.write_settings_json(self._settings_path, raw)
             except (OSError, ValueError) as exc:

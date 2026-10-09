@@ -115,7 +115,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             "- Be a polygon layer (e.g., representing building footprints).\n"
             "- Contain the required fields: 'BuildYear', 'BuildCode', "
             " 'BBRArea', and 'BBRUUID'.\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
