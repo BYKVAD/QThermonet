@@ -157,7 +157,13 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
         input_depth = self.parameterAsInt(parameters, self.DEPTH, context)
         output_folder = self.parameterAsString(parameters, 'OUTPUT_FOLDER', context)
-        settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
+        # An emptied field means "no settings file" (see its help text) --
+        # checked on the raw value, since parameterAsFile falls back to the
+        # default (the active settings file) for "" and None (2026-10-15).
+        if self.SETTINGS_FILE in parameters and not parameters[self.SETTINGS_FILE]:
+            settings_path = ""
+        else:
+            settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
         update_thermal_conductivity = self.parameterAsBoolean(
             parameters, self.UPDATE_THERMAL_CONDUCTIVITY, context
         )

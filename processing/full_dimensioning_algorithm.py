@@ -32,6 +32,7 @@ __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
 
 __revision__ = '$Format:%H$'
 
+import html
 import json
 import os
 import tempfile
@@ -39,6 +40,7 @@ import tempfile
 from qgis.PyQt.QtGui import QIcon
 
 from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.core import (Qgis,
                        QgsCoordinateReferenceSystem,
                        QgsCoordinateTransform,
@@ -86,7 +88,16 @@ from pythermonet.input import (
     read_pipe_catalog,
     read_undimensioned_topology_tsv,
 )
-from pythermonet.output import print_bhe_results, print_hhe_results
+from pythermonet.output import (
+    format_bhe_results,
+    format_hhe_results,
+    print_bhe_results,
+    print_hhe_results,
+    save_bhe_results_json,
+    save_bhe_results_txt,
+    save_hhe_results_json,
+    save_hhe_results_txt,
+)
 
 
 def _modelica_file_names(he_mode: str) -> list[str]:
@@ -213,11 +224,42 @@ def _borefield_geojson_to_dat(geojson_path: str) -> str:
     return dat_path
 
 
+def _push_report(feedback, report: str) -> None:
+    """Show the results report in the Log tab with its column alignment kept.
+
+    The log renders messages as HTML, which collapses runs of spaces and
+    uses a proportional font -- `<pre>` keeps both spaces and a fixed-width
+    font. The plain-text copy is what QGIS uses elsewhere (e.g. History).
+    """
+    feedback.pushFormattedMessage(f"<pre>{html.escape(report)}</pre>", report)
+
+
+def _default_results_path(extension: str) -> str:
+    """`dimensioning_results_<bhe|hhe>.<extension>` in the project folder.
+
+    The mode comes from the settings file active when the dialog opens --
+    it doesn't follow a settings file picked in the dialog afterwards
+    (prepareAlgorithm asks if the names then don't match).
+    """
+    name = "dimensioning_results"
+    settings_path = utils.get_current_settings_path()
+    if settings_path:
+        try:
+            with open(settings_path, encoding="utf-8") as f:
+                mode = utils.detect_mode(json.load(f))
+        except (OSError, ValueError):  # ValueError includes JSONDecodeError
+            mode = None
+        if mode:
+            name += f"_{mode.lower()}"
+    return os.path.join(utils.default_save_directory(), f"{name}.{extension}")
+
+
 class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
 
     #Handle input/output
     PID = "PID"
-    OUTPUT = 'OUTPUT'
+    RESULTS_TXT = "RESULTS_TXT"
+    RESULTS_JSON = "RESULTS_JSON"
     INPUT_LOAD = 'INPUT_LOAD'
     INPUT_Topology = 'INPUT_Topology'
     SETTINGS_FILE = "SETTINGS_FILE"
@@ -303,15 +345,33 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         )
         self.addParameter(param)
 
-        # Output file
-        self.addParameter(
-            QgsProcessingParameterFileDestination(
-                self.OUTPUT,
-                "Output File",
-                "CSV files (*.csv)",
-                defaultValue=os.path.join(utils.default_save_directory(), "full_dimensioning_output.csv")
+        # Result files (written by pythermonet). Optional: "Skip Output" keeps
+        # the results in the Log tab / Python console only.
+        param = QgsProcessingParameterFileDestination(
+                self.RESULTS_TXT,
+                self.tr("Results report (.txt) — skip to see the results only in the Log tab / Python console"),
+                "Text files (*.txt)",
+                defaultValue=_default_results_path("txt"),
+                optional=True,
             )
+        param.setHelp(
+            "The dimensioning results as a readable report -- the same text "
+            "as shown in the Log tab and the Python console.\n"
         )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterFileDestination(
+                self.RESULTS_JSON,
+                self.tr("Results data (.json) — skip to not save it"),
+                "JSON files (*.json)",
+                defaultValue=_default_results_path("json"),
+                optional=True,
+            )
+        param.setHelp(
+            "The dimensioning results for use in other applications: every "
+            "value with its unit and a short description.\n"
+        )
+        self.addParameter(param)
 
         # --- Modelica export -- toggle at the bottom of the dialog ---
         param = QgsProcessingParameterBoolean(
@@ -379,43 +439,88 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback):
             return False
 
-        # Only the Modelica export goes through the overwrite check -- the
-        # OUTPUT CSV isn't written yet (a pythermonet concern, left as is).
-        if not self.parameterAsBoolean(parameters, self.EXPORT_MODELICA, context):
-            return True
-        folder = self.parameterAsString(parameters, self.MODELICA_OUTPUT_FOLDER, context)
         settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
         try:
             with open(settings_path, encoding="utf-8") as f:
                 he_mode = utils.detect_mode(json.load(f))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             he_mode = None  # the run itself reports a bad settings file properly
-        if not folder or he_mode is None:
-            return True
-        paths = [os.path.join(folder, name) for name in _modelica_file_names(he_mode)]
+
+        results_paths = self._results_paths(parameters, context)
+        if he_mode is not None and not self._confirm_results_names(results_paths, he_mode):
+            feedback.reportError("Cancelled -- no files were changed.")
+            return False
+
+        paths = list(results_paths.values())
+        folder = self.parameterAsString(parameters, self.MODELICA_OUTPUT_FOLDER, context)
+        if self.parameterAsBoolean(parameters, self.EXPORT_MODELICA, context) and folder and he_mode is not None:
+            paths += [os.path.join(folder, name) for name in _modelica_file_names(he_mode)]
         if not output_handling.confirm_overwrite(paths):
             feedback.reportError("Cancelled -- no files were changed.")
             return False
         return True
 
+    def _results_paths(self, parameters, context) -> dict[str, str]:
+        """The result files to write, by parameter name (skipped ones left out)."""
+        paths = {}
+        for name in (self.RESULTS_TXT, self.RESULTS_JSON):
+            # Skipped: the dialog leaves an emptied or "Skip Output" field out
+            # of `parameters` altogether (ParametersPanel only adds outputs
+            # `if value`), and parameterAsFileOutput would then fall back to
+            # the default path -- so missing or empty both mean skip.
+            if not parameters.get(name):
+                continue
+            path = self.parameterAsFileOutput(parameters, name, context)
+            if path:
+                paths[name] = path
+        return paths
+
+    @staticmethod
+    def _confirm_results_names(results_paths, he_mode) -> bool:
+        """Ask before writing a "..._bhe"/"..._hhe" result file for the other mode.
+
+        The default names follow the settings file active when the dialog
+        opened, not one picked in the dialog afterwards. Custom names (no
+        such ending) aren't questioned.
+        """
+        from qgis.utils import iface
+
+        mismatched = []
+        for path in results_paths.values():
+            stem = os.path.splitext(os.path.basename(path))[0].lower()
+            if stem.endswith(("_bhe", "_hhe")) and not stem.endswith(f"_{he_mode.lower()}"):
+                mismatched.append(path)
+        if not mismatched or iface is None:
+            return True
+        answer = QMessageBox.question(
+            iface.mainWindow(),
+            "Result file names",
+            f"The settings file is {he_mode}, but these result files are named for the "
+            "other mode:\n\n" + "\n".join(mismatched) + "\n\nContinue anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def processAlgorithm(self, parameters, context, feedback):
-        # The Modelica files are written to a temp folder and only moved into
-        # the real folder after a successful run (postProcessAlgorithm).
+        # The result files and the Modelica files are written to temp paths
+        # and only moved into place after a successful run (postProcessAlgorithm).
         self._outputs = output_handling.OutputSet()
         self._refresh_trenches_for = None
+        results_paths = self._results_paths(parameters, context)
+        results_temp_paths = {name: self._outputs.add_file(path) for name, path in results_paths.items()}
         modelica_temp_folder = None
         if self.parameterAsBoolean(parameters, self.EXPORT_MODELICA, context):
             folder = self.parameterAsString(parameters, self.MODELICA_OUTPUT_FOLDER, context)
             if folder:
                 modelica_temp_folder = self._outputs.add_folder(folder)
         try:
-            result = self._run(parameters, context, feedback, modelica_temp_folder)
+            self._run(parameters, context, feedback, modelica_temp_folder, results_temp_paths)
             if feedback.isCanceled():
                 raise QgsProcessingException("Cancelled -- no files were changed.")
         except Exception:
             self._outputs.discard()
             raise
-        return result
+        return results_paths
 
     def postProcessAlgorithm(self, context, feedback):
         if self._refresh_trenches_for is not None:
@@ -428,9 +533,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
         self._outputs.commit(feedback)
         return {}
 
-    def _run(self, parameters, context, feedback, modelica_temp_folder):
-        """Run the dimensioning; write any Modelica export into `modelica_temp_folder`."""
-        output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
+    def _run(self, parameters, context, feedback, modelica_temp_folder, results_temp_paths):
+        """Run the dimensioning; write the result files and any Modelica export to the given temp paths."""
         PID = self.parameterAsString(parameters, self.PID, context)
 
         #Handle input files
@@ -567,7 +671,10 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 sizing=sizing,
                 brine_temperature_limits=brine_temperature_limits,
             )
+            # Both: the Python console (as when running pythermonet itself)
+            # and the tool's Log tab.
             print_bhe_results(result)
+            _push_report(feedback, format_bhe_results(result))
 
             if export_modelica:
                 feedback.pushInfo("Writing Modelica export...")
@@ -625,7 +732,8 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 sizing=sizing,
                 brine_temperature_limits=brine_temperature_limits,
             )
-            print_hhe_results(result, pipe_infrastructure_hhe)
+            print_hhe_results(result)
+            _push_report(feedback, format_hhe_results(result))
 
             # Write the just-computed length back into the settings file's
             # hhe_field_parameters.length_element -- unlike BHE (no length
@@ -684,15 +792,16 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 )
                 feedback.pushInfo(f"Modelica export written to {modelica_output_folder}")
 
-        # # Write to output file
-        # feedback.pushInfo("Writing output...")
-        # with open(output_path, "w", newline="") as csv_file:
-        #     writer = csv.writer(csv_file)
-        #     writer.writerows(table_content)
+        save_txt, save_json = (
+            (save_bhe_results_txt, save_bhe_results_json) if he_mode == "BHE"
+            else (save_hhe_results_txt, save_hhe_results_json)
+        )
+        if self.RESULTS_TXT in results_temp_paths:
+            save_txt(result, results_temp_paths[self.RESULTS_TXT])
+        if self.RESULTS_JSON in results_temp_paths:
+            save_json(result, results_temp_paths[self.RESULTS_JSON])
 
         feedback.pushInfo("Processing complete!")
-
-        return {self.OUTPUT: output_path}
 
     def name(self):
         """
@@ -751,8 +860,13 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 "4. Borefield layer (GeoJSON): required only when the "
                 "settings file above is a BHE settings file. Can be "
                 "created using the 'Source Placement' tool. <p>"
-                "<p><b> Output:</b> Input parameters and results are stored in an output "
-                "report.dat file (not yet implemented). <p>"
+                "<p><b> Output:</b> The results are shown in the Log tab and the "
+                "Python console, and saved as a readable report (.txt) and as "
+                "data with units and descriptions for other applications "
+                "(.json). Choose 'Skip Output' for a file to not save it. The "
+                "default names end in _bhe or _hhe, after the settings file "
+                "active when the dialog opened; you're asked before writing a "
+                "name that doesn't match the settings file you run. <p>"
                 "<p> Optionally, checking 'Export project to Modelica' also "
                 "writes heatpumps.json, pipes.json, a ground-field file "
                 "(boreholes.json for BHE, trenches.json for HHE) and a "
