@@ -30,7 +30,10 @@ def fetch_api_data(X, Y):
     params   = {"x": X, "y": Y}
 
     try:
-        response = rq.get(base_url, params=params, timeout=10)
+        # (connect, read) seconds -- same as Get Buildings. Get Ground
+        # Conductivity calls this ~10 times per run, so one slow reply under
+        # the old flat 10 s failed the whole run (seen 2026-10-01).
+        response = rq.get(base_url, params=params, timeout=(20, 120))
     except rq.exceptions.ConnectionError:
         raise ValueError("Could not connect to the GEUS API. Check your internet connection.")
     except rq.exceptions.Timeout:

@@ -31,7 +31,6 @@ __copyright__ = '(C) 2026 by Jane Lund Andersen/VIA University College'
 __revision__ = '$Format:%H$'
 
 import os
-import requests as rq
 import inspect
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -222,7 +221,6 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             x  = centerX + dx
             y  = centerY + dy
             tc = calculate_tc(x, y, input_depth) #function located in utils.py
-            # tc = self.calculate_tc_internal(x, y, input_depth, feedback) #function located below
             if tc is not None:
                 tc_values.append(tc)
                 feedback.pushInfo(f"  TC at ({x}, {y}): {tc:.2f} W/m·K")
@@ -436,55 +434,6 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         for spine in ax.spines.values():
             spine.set_visible(True)
             spine.set_linewidth(0.6)
-        
-    def calculate_tc_internal(self, centerX, centerY, input_depth, feedback=None):
-        """Fetch API data and calculate weighted average thermal conductivity for a single point."""
-        
-        base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
-        params   = {"x": centerX, "y": centerY}
-        
-        response = rq.get(base_url, params=params)
-        
-        if response.status_code != 200:
-            if feedback:
-                feedback.pushInfo(f"  Request failed for X={centerX}, Y={centerY}: status {response.status_code}")
-            return None
-        
-        data = response.json()
-        
-        if "error" in data:
-            if feedback:
-                feedback.pushInfo(f"  API error for X={centerX}, Y={centerY}: {data['error']}")
-            return None
-        
-        if input_depth == 150:
-            return data["tc_avg_0m_150m"]
-        
-        layers = data["layers"]
-        
-        tc_weighted_sum = 0
-        total_thickness = 0
-    
-        for layer in layers:
-            layer_top    = layer["top"]
-            layer_bottom = layer["bottom"]
-    
-            if layer_bottom <= 0 or layer_top >= input_depth:
-                continue
-    
-            clipped_top    = max(layer_top,    0)
-            clipped_bottom = min(layer_bottom, input_depth)
-    
-            thickness_within_depth = clipped_bottom - clipped_top
-    
-            if thickness_within_depth > 0:
-                tc_weighted_sum += layer["tc_corrected_for_phreatic"] * thickness_within_depth
-                total_thickness += thickness_within_depth
-    
-        if total_thickness > 0:
-            return tc_weighted_sum / total_thickness
-        else:
-            return None
 
     def name(self):
         """
