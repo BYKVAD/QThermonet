@@ -25,6 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+# Plugin release zips (built with git archive)
+*.zip
 
 # PyInstaller
 #   Usually these files are written by a python script from a template
