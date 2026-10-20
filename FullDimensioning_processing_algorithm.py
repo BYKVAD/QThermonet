@@ -288,7 +288,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                         
         # Handle pipe catalogue file
         feedback.pushInfo("Handling pipe file...")
-        d_pipes = load_pipe_catalogue().values / 1000 # Convert d_pipes from mm to m
+        d_pipes = load_pipe_catalogue()["Pipe diameters (mm)"].to_numpy() / 1000 # Convert d_pipes from mm to m
         
         
         # Set brine properties
@@ -421,7 +421,7 @@ class FullDimensioningAlgorithm(QgsProcessingAlgorithm):
                 "model for ambient temperature district heating and cooling networks. "
                 "Science and Technology for the Built Environment, 31(8), 879–888. "
                 "<a href=\"https://doi.org/10.1080/23744731.2025.2523198\">https://doi.org/10.1080/23744731.2025.2523198</a>.<p>" 
-                "<p> Code on GitHub: <a href=\"https://github.com/BYKVAD/pythermonetII\">https://github.com/BYKVAD/pythermonetII</a>.<p>"
+                "<p> Code on GitHub: <a href=\"https://github.com/BYKVAD/pythermonet/tree/legacy\">https://github.com/BYKVAD/pythermonet/tree/legacy</a>.<p>"
                 )
 
     def createInstance(self):
