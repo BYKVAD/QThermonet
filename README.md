@@ -24,10 +24,11 @@ To install it:
 
 The script finds QGIS 3 in `C:\Program Files` or `C:\OSGeo4W`. The packages QGIS already ships (such as numpy, pandas and scipy) are kept at their current versions; only missing packages are added.
 
-Further installation guidelines are provided in QThermonet_tutorial_1.pdf
+Further installation guidelines are provided in the tutorial (see Getting started).
 
 ## Getting started
-Guidlines for installation, description of the individual tools in the plugin, and a small test example is provided in the [`Tutorial1/`](./Tutorial1/) folder.
+Guidelines for installation, description of the individual tools in the plugin, and a small test example are provided in the tutorial for this version (PDF and test data):  
+https://github.com/BYKVAD/QThermonet/tree/v0.2.3/Tutorial1
 
 ## Troubleshooting
 **Output layers have no coordinate system, or appear in the wrong place on the map.**  

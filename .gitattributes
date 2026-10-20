@@ -8,3 +8,14 @@
 *.shp binary
 *.shx binary
 *.dbf binary
+
+# Left out of release zips (git archive)
+.gitattributes export-ignore
+.gitignore export-ignore
+CONTRIBUTING.md export-ignore
+Makefile export-ignore
+pb_tool.cfg export-ignore
+pylintrc export-ignore
+help/ export-ignore
+scripts/ export-ignore
+Tutorial1/ export-ignore
