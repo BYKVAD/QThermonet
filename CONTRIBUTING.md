@@ -45,6 +45,19 @@ tagging rule (tag `main` only, at release time) stays the same either way.
 tag** (e.g. `@v0.2.0`), never to `@main` or `@dev` — those branch tips move underneath
 you and aren't stable references.
 
+## Building the plugin zip
+
+The zip uploaded to plugins.qgis.org is built with `build_plugin_zip.bat` (double-click it
+in the repository folder). It builds the zip from the last commit (`HEAD`), so commit and
+push first — uncommitted changes are not included. The file is named after the `version=`
+field in `metadata.txt`, e.g. `qthermonet_processing_v_0_1-v0.2.3.zip`.
+
+The script leaves the tutorial and development files (`Tutorial1/`, `help/`, `scripts/`,
+`CONTRIBUTING.md`, `Makefile`, …) out of the plugin zip only. GitHub's own downloads
+(*Code → Download ZIP* and the source code of a release) still contain the whole
+repository. The zip's top folder must stay `qthermonet_processing_v_0_1`: that is the
+plugin's name on plugins.qgis.org.
+
 ## Branch protection
 
 `main` and `dev` are both protected: direct pushes are rejected, and merging requires an
