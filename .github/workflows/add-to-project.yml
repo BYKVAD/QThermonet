@@ -14,6 +14,11 @@ jobs:
     env:
       # Product option in the Project for this repo: QThermonet ("" = leave Product empty)
       PRODUCT_OPTION_ID: "219085df"
+      # Default Funding for new issues in this repo ("" = set at triage). Use it only when the repo is
+      # paid for by one grant for a long time; change it when the funding changes. Options:
+      # CGH II b36feb51, HEATCODE 23699162, LEG-DHC f5aa54b6, The CHANGE 2b159301,
+      # Thermoroad 884430df, LTDE-repBC 8decde8e
+      FUNDING_OPTION_ID: ""
     steps:
       - name: Get a token for BYKVAD Bot
         id: app-token
@@ -43,3 +48,15 @@ jobs:
           --project-id PVT_kwDODDoiGs4BIiF2
           --field-id PVTSSF_lADODDoiGs4BIiF2zhqSOlE
           --single-select-option-id "$PRODUCT_OPTION_ID"
+
+      - name: Set Funding
+        if: env.FUNDING_OPTION_ID != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ITEM_ID: ${{ steps.add.outputs.itemId }}
+        run: >-
+          gh project item-edit
+          --id "$ITEM_ID"
+          --project-id PVT_kwDODDoiGs4BIiF2
+          --field-id PVTSSF_lADODDoiGs4BIiF2zg494nk
+          --single-select-option-id "$FUNDING_OPTION_ID"
