@@ -1,0 +1,45 @@
+# Adds every new issue to the BYKVAD Project "program-of-energy" and sets its Product.
+# Runs as the BYKVAD Bot GitHub App. See github-setup.md in renewable-energy-workspace.
+name: Add issue to Project
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+    env:
+      # Product option in the Project for this repo: QThermonet ("" = leave Product empty)
+      PRODUCT_OPTION_ID: "219085df"
+    steps:
+      - name: Get a token for BYKVAD Bot
+        id: app-token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: Iv23linp15wgi2xTYSkY
+          private-key: ${{ secrets.BYKVAD_BOT_PRIVATE_KEY }}
+          owner: BYKVAD
+          permission-issues: read
+          permission-organization-projects: write
+
+      - name: Add the issue to the Project
+        id: add
+        uses: actions/add-to-project@v2.0.0
+        with:
+          project-url: https://github.com/orgs/BYKVAD/projects/2
+          github-token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set Product
+        if: env.PRODUCT_OPTION_ID != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ITEM_ID: ${{ steps.add.outputs.itemId }}
+        run: >-
+          gh project item-edit
+          --id "$ITEM_ID"
+          --project-id PVT_kwDODDoiGs4BIiF2
+          --field-id PVTSSF_lADODDoiGs4BIiF2zhqSOlE
+          --single-select-option-id "$PRODUCT_OPTION_ID"
