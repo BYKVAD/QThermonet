@@ -51,7 +51,7 @@ from qgis.core import (
     QgsVectorFileWriter,
     QgsVectorLayer
 )
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QIcon
 import os
 import inspect
@@ -77,12 +77,14 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         param.setHelp(
             "The input layer must:\n"
             "- Be a polygon layer (e.g., representing building footprints).\n"
-            "- Contain the required fields: 'Thermonet' and 'BBRUUID'.\n"
+            "- Contain the required fields: 'Thermonet' and 'id.lokalId'.\n"
+            "- Optionally contain 'YrHeatLoad', 'WiHeatLoad', 'DyHeatLoad' "
+            "(passed through to the output when present).\n"
             "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
         )
 
         self.addParameter(param)
-       
+
         # 2nd input
         param = QgsProcessingParameterVectorLayer(
             self.PIPES_LAYER,
@@ -109,8 +111,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             )
         param.setHelp(
             "The output layer will contain the shortest distance service pipes "
-            "between each building and the nearest point on the nearest pipe. \n"
-            "- It will contain all fields from both input layers.\n"
+            "between each building and the nearest point on the nearest pipe.\n"
+            "- It has a fixed schema: 'id.lokalId', 'Thermonet', 'YrHeatLoad', "
+            "'WiHeatLoad', 'DyHeatLoad', 'ellip_length'.\n"
             "- It is an essential input to the 'Pipe Topology' tool."
             )
         self.addParameter(param)
@@ -124,9 +127,25 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         if not buildings_layer or not pipes_layer:
             raise QgsProcessingException("Invalid input layers!")
             
-        # Ensure the "Thermonet" field exists in the buildings layer
-        if "Thermonet" not in [field.name() for field in buildings_layer.fields()]:
-            raise QgsProcessingException("The source layer does not contain a 'Thermonet' field!")
+        # Validate required fields on inputs up front so we fail before the
+        # processing loop rather than crashing deep inside feature iteration.
+        building_field_names = [field.name() for field in buildings_layer.fields()]
+        pipe_field_names = [field.name() for field in pipes_layer.fields()]
+
+        required_building_fields = ["Thermonet", "id.lokalId"]
+        missing_building_fields = [
+            f for f in required_building_fields if f not in building_field_names
+        ]
+        if missing_building_fields:
+            raise QgsProcessingException(
+                "The buildings layer is missing required field(s): "
+                f"{', '.join(missing_building_fields)}."
+            )
+
+        has_yr = "YrHeatLoad" in building_field_names
+        has_wi = "WiHeatLoad" in building_field_names
+        has_dy = "DyHeatLoad" in building_field_names
+        has_ellip = "ellip_length" in pipe_field_names
     
         # Filter buildings with Thermonet = "Yes"
         buildings = [
@@ -150,24 +169,21 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         # Prepare output fields
         feedback.pushInfo("Preparing output fields ...")
 
-        output_fields = QgsFields()
-        for field in buildings_layer.fields():
-            if field.name() == "YrHeatLoad":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 0))
-            elif field.name() == "WiHeatLoad":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 0))
-            elif field.name() == "DyHeatLoad":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 0))
-            else:
-                # Use default type/length/precision from input
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision()))
+        # Fixed schema: deterministic across runs regardless of what extra
+        # columns the inputs happen to carry. Downstream consumers only need
+        # 'id.lokalId'; the rest are user-facing / inspection fields.
+        field_definitions = [
+            ("id.lokalId",   QMetaType.Type.QString, 255, 0),
+            ("Thermonet",    QMetaType.Type.QString, 10,  0),
+            ("YrHeatLoad",   QMetaType.Type.Double,  10,  0),
+            ("WiHeatLoad",   QMetaType.Type.Double,  10,  0),
+            ("DyHeatLoad",   QMetaType.Type.Double,  10,  0),
+            ("ellip_length", QMetaType.Type.Double,  10,  1),
+        ]
 
-        for field in pipes_layer.fields():
-            if field.name() == "ellip_length":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 1))
-            else:
-                # Use default type/length/precision from input
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision()))
+        output_fields = QgsFields()
+        for field_name, field_type, field_length, field_precision in field_definitions:
+            output_fields.append(QgsField(field_name, field_type, len=field_length, prec=field_precision))
                                   
         # Accumulate output features in memory, then write them out with
         # writeAsVectorFormatV3 at the end - QgsProcessingParameterFeatureSink's
@@ -241,9 +257,12 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         
             new_feature = QgsFeature(output_fields)
             new_feature.setGeometry(QgsGeometry.fromPolylineXY([start_point, end_point]))
-            new_feature.setAttributes(
-                building.attributes() + closest_pipe_feature.attributes()
-            )
+            new_feature["id.lokalId"]   = building["id.lokalId"]
+            new_feature["Thermonet"]    = building["Thermonet"]
+            new_feature["YrHeatLoad"]   = building["YrHeatLoad"]           if has_yr    else None
+            new_feature["WiHeatLoad"]   = building["WiHeatLoad"]           if has_wi    else None
+            new_feature["DyHeatLoad"]   = building["DyHeatLoad"]           if has_dy    else None
+            new_feature["ellip_length"] = closest_pipe_feature["ellip_length"] if has_ellip else None
             new_features.append(new_feature)
 
         accumulator_provider.addFeatures(new_features)
