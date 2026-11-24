@@ -1,4 +1,16 @@
 # -*- coding: utf-8 -*-
+
+import os, sys
+
+if os.environ.get("QGIS_PLUGIN_DEBUG") == "1":
+    try:
+        import debugpy
+        py = os.path.join(sys.prefix, "python.exe" if os.name == "nt" else "bin/python3")
+        if os.path.exists(py):
+            debugpy.configure(python=py)
+        debugpy.listen(("localhost", 5678))
+    except RuntimeError:
+        pass  # already listening after a reload
 """
 /***************************************************************************
  QThermonet
