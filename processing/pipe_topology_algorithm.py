@@ -29,16 +29,17 @@ __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
 
 from qgis.core import (
     QgsCoordinateReferenceSystem,
-    QgsExpression,
-    QgsExpressionContext,
-    QgsExpressionContextUtils,
+    QgsCoordinateTransform,
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
     QgsFields,
+    QgsGeometry,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterDefinition,
     QgsProcessingParameterFileDestination,
     QgsProcessingParameterVectorLayer,
     QgsProject,
@@ -52,15 +53,165 @@ from qgis.PyQt.QtGui import QIcon
 from qgis import processing
 import os
 import inspect
-from .. import utils
+from .. import output_handling, utils
+from .main_pipe_hierarchy_algorithm import get_connection_node_geometry, style_main_pipes
+
+#: A service pipe within this distance of a main pipe is tied in to it -- the
+#: same tolerance the topology uses to collect heat pump IDs.
+_TIE_IN_TOLERANCE = 0.1  # m
+#: Main pipes within this distance of each other are connected -- the same
+#: tolerance the topology uses for "downstream" pipes.
+_JUNCTION_TOLERANCE = 1.0  # m
+#: Cut-offs shorter than this are floating-point noise, not tails.
+_MIN_CROP_LENGTH = 0.001  # m
+
+
+def _merge_to_line(geometry):
+    """`geometry` as one single-part line, or `None` if its parts don't join up."""
+    merged = geometry.mergeLines() if geometry.isMultipart() else QgsGeometry(geometry)
+    if merged.isEmpty() or merged.isMultipart():
+        return None
+    return merged
+
+
+def _crop_network(pipes, service_geometries, node_point, distance_area):
+    """Remove main pipes without heat pumps and trim pipe ends past their last connection.
+
+    A pipe is in use if a service pipe is tied in to it or to a pipe
+    downstream of it (away from the source). Unused pipes are removed; each
+    kept pipe is cut to the stretch between its first and last "keep" point:
+    service-pipe tie-ins, junctions with kept pipes, and -- on the root pipe
+    -- the source's connection node. See
+    `claude/handoffs/2026-10-09-network-cropping-design.md`.
+
+    Parameters
+    ----------
+    pipes : list of tuple(int, QgsGeometry, int)
+        ``(feature id, geometry, Level)`` of each main pipe.
+    service_geometries : list of QgsGeometry
+        The service pipes, in the main pipes' CRS.
+    node_point : QgsPointXY
+        The source's connection node, in the main pipes' CRS.
+    distance_area : QgsDistanceArea
+        Ellipsoidal calculator for the reported lengths (metres).
+
+    Returns
+    -------
+    kept : dict[int, QgsGeometry]
+        New geometry per kept feature id (unchanged pipes included).
+    report : list of tuple(str, float, str)
+        ``(action, length in m, text)`` per removed pipe, trimmed end or
+        pipe left as is (see `_describe`).
+    """
+    geometries = {fid: geometry for fid, geometry, _ in pipes}
+    levels = {fid: level for fid, _, level in pipes}
+
+    # Tie-in points per pipe (where on the pipe each service pipe connects)
+    tie_ins = {fid: [] for fid in geometries}
+    for service in service_geometries:
+        for fid, geometry in geometries.items():
+            if geometry.distance(service) <= _TIE_IN_TOLERANCE:
+                tie_ins[fid].append(geometry.nearestPoint(service).asPoint())
+
+    neighbours = {
+        fid: [
+            other for other in geometries
+            if other != fid and geometries[fid].distance(geometries[other]) <= _JUNCTION_TOLERANCE
+        ]
+        for fid in geometries
+    }
+
+    # Walk outwards from the root pipe (nearest the source) to find parents
+    node_geometry = QgsGeometry.fromPointXY(node_point)
+    root = min(geometries, key=lambda fid: geometries[fid].distance(node_geometry))
+    parent = {root: None}
+    order = [root]
+    for fid in order:
+        for other in neighbours[fid]:
+            if other not in parent:
+                parent[other] = fid
+                order.append(other)
+
+    # In use: own tie-in, or a child in use (decided from the leaves inwards).
+    # Pipes the walk never reached aren't connected to the source at all.
+    in_use = {fid: bool(tie_ins[fid]) for fid in order}
+    for fid in reversed(order):
+        if in_use[fid] and parent[fid] is not None:
+            in_use[parent[fid]] = True
+
+    report = []
+    kept = {}
+    for fid, geometry in geometries.items():
+        if fid not in parent:
+            # Not connected to the source (Main Pipe Hierarchy warns about
+            # these too) -- left as is rather than dropping its buildings.
+            report.append(_describe(
+                "Not connected to the source, left as is", geometry, levels[fid], distance_area
+            ))
+            kept[fid] = geometry
+            continue
+        if not in_use[fid]:
+            report.append(_describe("Removed a main pipe without heat pumps", geometry, levels[fid], distance_area))
+            continue
+
+        keep_points = list(tie_ins[fid])
+        keep_points += [
+            geometry.nearestPoint(geometries[other]).asPoint()
+            for other in neighbours[fid] if in_use.get(other, False)
+        ]
+        if fid == root:
+            keep_points.append(geometry.nearestPoint(node_geometry).asPoint())
+
+        line = _merge_to_line(geometry)
+        if line is None:
+            report.append(_describe(
+                "Not trimmed (its parts don't form one line)", geometry, levels[fid], distance_area
+            ))
+            kept[fid] = geometry
+            continue
+
+        positions = [line.lineLocatePoint(QgsGeometry.fromPointXY(point)) for point in keep_points]
+        start, end, total = min(positions), max(positions), line.length()
+        curve = line.constGet()
+        used = QgsGeometry(curve.curveSubstring(start, end))
+        if distance_area.measureLength(used) < _MIN_CROP_LENGTH:
+            # Its only connection sits on its junction -- nothing to dimension
+            report.append(_describe("Removed a main pipe without heat pumps", geometry, levels[fid], distance_area))
+            continue
+        for cut_from, cut_to in ((0.0, start), (end, total)):
+            cut = QgsGeometry(curve.curveSubstring(cut_from, cut_to))
+            if distance_area.measureLength(cut) >= _MIN_CROP_LENGTH:
+                report.append(_describe("Trimmed the end of a main pipe", cut, levels[fid], distance_area))
+        kept[fid] = used
+
+    return kept, report
+
+
+def _describe(action, geometry, level, distance_area) -> tuple[str, float, str]:
+    """One report entry: ``(action, length in m, text with Level, length and midpoint)``."""
+    length = distance_area.measureLength(geometry)
+    midpoint = geometry.interpolate(geometry.length() / 2).asPoint()
+    text = f"{action} (Level {level}, {length:.2f} m, midpoint at {midpoint.x():.1f}, {midpoint.y():.1f})"
+    return action, length, text
+
 
 class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
     
     #Handle input/output
     PIPES_LAYER = "PIPES_LAYER"
     SERVICE_PIPES_LAYER = "SERVICE_PIPES_LAYER"
+    SOURCE_LAYER = "SOURCE_LAYER"
+    CROP_NETWORK = "CROP_NETWORK"
+    CROP_MAINS_FILE = "CROP_MAINS_FILE"
+    #: Hidden; where to write the cropped main pipes when run as a step
+    #: (standalone, they're written back to the main pipes input file).
+    CROPPED_MAINS_OUTPUT = "CROPPED_MAINS_OUTPUT"
     OUTPUT = "OUTPUT"
     DAT_OUTPUT = "DAT_OUTPUT"
+    #: Hidden; `True` when Build Pipe Network runs this tool as one of its
+    #: steps -- then no overwrite pop-up, no temp-file swap, no path caching
+    #: and no layer loading (see output_handling.OutputSet's step mode).
+    RUN_AS_STEP = "RUN_AS_STEP"
 
     def initAlgorithm(self, config=None):
         
@@ -69,12 +220,13 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                 self.PIPES_LAYER,
                 "Select the Pipes Layer",
                 [QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("mains_file"),
             )
         param.setHelp(
             "The input layer must:\n"
             "- contain the main pipes network of the thermonet.\n"
             "- Contain the required fields: 'Level' that defines the hierarchy of the pipe-heatpump connections.\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -84,54 +236,240 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                 self.SERVICE_PIPES_LAYER,
                 "Select the Service Pipes Layer",
                 [QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("service_pipes_file"),
             )
         param.setHelp(
             "The service pipes layer must:\n"
             "- contain the service pipes connecting the heatpumps to the main thermonet pipes.\n"
-            "- Contain the heatpump ID's of the heatpumps in field with name 'id.lokalId' \n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
+            "- Contain the heatpump ID's of the heatpumps in field with name 'id_lokalId' \n"
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
-        
+
+        # Only needed for cropping: the root pipe must keep its stretch from
+        # the source to the first building (it carries all the flow).
+        param = QgsProcessingParameterVectorLayer(
+                self.SOURCE_LAYER,
+                "Select the source placement layer",
+                [QgsProcessing.TypeVectorPoint, QgsProcessing.TypeVectorLine],
+                defaultValue=utils.get_cached_path("source_file"),
+                optional=True,
+            )
+        param.setHelp(
+            "The output of the 'Source Placement' tool (BHE point layer or HHE trench "
+            "line layer, with an 'is_connection_node' attribute). Needed when "
+            "'Remove main pipes without heat pumps' is ticked."
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(
+            self.CROP_NETWORK, "Remove main pipes without heat pumps", defaultValue=True
+        )
+        param.setHelp(
+            "Removes main pipes with no heat pumps on them or downstream, and trims "
+            "the end of a pipe past its last connection -- such pipes carry no flow. "
+            "Unticked, a main pipe without heat pumps stops the run with an error."
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(
+            self.CROP_MAINS_FILE, "Also crop the main pipe hierarchy file", defaultValue=False
+        )
+        param.setHelp(
+            "Also writes the cropped main pipes back to the main pipes input file. "
+            "Unticked, only the topology outputs are cropped, so comparing the two "
+            "layers shows what was removed."
+        )
+        self.addParameter(param)
+
         #output geojson
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 self.tr('Output GeoJSON'),
-                fileFilter="GeoJSON (*.geojson)"  # Filter for file type
+                fileFilter="GeoJSON (*.geojson)",  # Filter for file type
+                defaultValue=os.path.join(utils.default_save_directory(), "pipe_topology.geojson")
             )
         )
-        
+
         #output dat-format
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 "DAT_OUTPUT",
                 self.tr("Output DAT file"),
-                fileFilter="DAT files (*.dat)"
+                fileFilter="DAT files (*.dat)",
+                defaultValue=os.path.join(utils.default_save_directory(), "pipe_topology.dat")
             )
         )
 
+        param = QgsProcessingParameterBoolean(self.RUN_AS_STEP, "Run as a step", defaultValue=False)
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagHidden)
+        self.addParameter(param)
+
+        param = QgsProcessingParameterFileDestination(
+            self.CROPPED_MAINS_OUTPUT, "Cropped main pipes (step mode)",
+            fileFilter="GeoJSON (*.geojson)", optional=True,
+        )
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagHidden)
+        self.addParameter(param)
+
+    def checkParameterValues(self, parameters, context):
+        """Require a source layer when cropping is on.
+
+        Parameters
+        ----------
+        parameters : dict
+            The run's parameter values.
+        context : QgsProcessingContext
+            The run's context.
+
+        Returns
+        -------
+        tuple[bool, str]
+            ``(True, "")`` if the run can start, else ``(False, message)``.
+
+        """
+        ok, message = super().checkParameterValues(parameters, context)
+        if not ok:
+            return ok, message
+        if (
+            self.parameterAsBoolean(parameters, self.CROP_NETWORK, context)
+            and self.parameterAsVectorLayer(parameters, self.SOURCE_LAYER, context) is None
+        ):
+            return False, (
+                "'Remove main pipes without heat pumps' needs the source placement layer "
+                "(to keep the pipe stretch between the source and the first building). "
+                "Select it, or untick the option."
+            )
+        if self._crops_mains_file(parameters, context) and not self.parameterAsBoolean(
+            parameters, self.RUN_AS_STEP, context
+        ) and self._mains_file_path(parameters, context) is None:
+            return False, (
+                "'Also crop the main pipe hierarchy file' needs the main pipes layer to be "
+                "a file (e.g. main_pipe_hierarchy.geojson), not a temporary layer."
+            )
+        return True, ""
+
+    def _crops_mains_file(self, parameters, context) -> bool:
+        return self.parameterAsBoolean(parameters, self.CROP_NETWORK, context) and self.parameterAsBoolean(
+            parameters, self.CROP_MAINS_FILE, context
+        )
+
+    def _mains_file_path(self, parameters, context) -> str | None:
+        """The main pipes input's file path, or None if it isn't a file-based layer."""
+        layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
+        if layer is None or layer.providerType() != "ogr":
+            return None
+        path = layer.source().split("|", 1)[0]
+        return path if os.path.isfile(path) else None
+
+    def prepareAlgorithm(self, parameters, context, feedback):
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.PIPES_LAYER):
+            return False
+        if not self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context):
+            paths = [
+                self.parameterAsFileOutput(parameters, self.OUTPUT, context),
+                self.parameterAsFileOutput(parameters, "DAT_OUTPUT", context),
+            ]
+            if self._crops_mains_file(parameters, context):
+                paths.append(self._mains_file_path(parameters, context))
+            if not output_handling.confirm_overwrite(paths):
+                feedback.reportError("Cancelled -- no files were changed.")
+                return False
+        return True
+
     def processAlgorithm(self, parameters, context, feedback):
-        pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
-        service_pipes_layer = self.parameterAsVectorLayer(parameters, self.SERVICE_PIPES_LAYER, context)
         output_path = self.parameterAsFileOutput(parameters, self.OUTPUT, context)
         dat_output_path = self.parameterAsFileOutput(parameters, "DAT_OUTPUT", context)
+        self._outputs = output_handling.OutputSet(
+            step_mode=self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context)
+        )
+        geojson_temp_path = self._outputs.add_file(
+            output_path,
+            layer_name="Pipe topology",
+            cache_roles=["topology_geojson_file"],
+        )
+        dat_temp_path = self._outputs.add_file(dat_output_path, cache_roles=["topology_dat_file"])
+        cropped_mains_path = None
+        if self._crops_mains_file(parameters, context):
+            if self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context):
+                cropped_mains_path = self.parameterAsFileOutput(parameters, self.CROPPED_MAINS_OUTPUT, context) or None
+            else:
+                cropped_mains_path = self._outputs.add_file(
+                    self._mains_file_path(parameters, context),
+                    layer_name="Main pipe hierarchy",
+                    cache_roles=["mains_file"],
+                    style_default=style_main_pipes,
+                )
+        try:
+            self._run(parameters, context, feedback, geojson_temp_path, dat_temp_path, cropped_mains_path)
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return {
+            self.OUTPUT: output_path,
+            "DAT_OUTPUT": dat_output_path,
+        }
 
-    
+    def postProcessAlgorithm(self, context, feedback):
+        self._outputs.commit(feedback)
+        return {}
+
+    def _run(self, parameters, context, feedback, output_path, dat_output_path, cropped_mains_path=None):
+        """Build the topology and write the outputs to the given (temp) paths.
+
+        `cropped_mains_path`: also write the cropped main pipes there (only
+        when cropping is on and "Also crop the main pipe hierarchy file").
+        """
+        pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
+        service_pipes_layer = self.parameterAsVectorLayer(parameters, self.SERVICE_PIPES_LAYER, context)
+
+
         if not pipes_layer or not service_pipes_layer:
             raise QgsProcessingException("Invalid input layers!")
-            
-        ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
-        default_projected_crs = QgsCoordinateReferenceSystem("EPSG:3857")
 
-        pipes_layer_proj = self._reproject_if_geographic(
+        ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
+        default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
+
+        pipes_layer_proj = self._reproject_if_not_metric(
             pipes_layer, "Pipes layer", default_projected_crs, context, feedback
         )
-        service_pipes_layer_proj = self._reproject_if_geographic(
-            service_pipes_layer, "Source layer", pipes_layer_proj.crs(), context, feedback
+        service_pipes_layer_proj = self._reproject_if_not_metric(
+            service_pipes_layer, "Service pipes layer", pipes_layer_proj.crs(), context, feedback
         )
-            
+
+        # ...then a final check catches the remaining case: both already
+        # projected (so neither branch above ran), but in two different
+        # projected CRSs -- the 0.1 m service-pipe search below would then
+        # compare coordinates from different systems and find nothing.
+        # Same check as service_pipes_algorithm.py.
+        if service_pipes_layer_proj.crs() != pipes_layer_proj.crs():
+            feedback.pushInfo(
+                f"Service pipes layer ({service_pipes_layer_proj.crs().authid()}) and pipes layer "
+                f"({pipes_layer_proj.crs().authid()}) are in different CRSs, reprojecting "
+                f"service pipes layer to match pipes layer."
+            )
+            service_pipes_layer_proj = processing.run(
+                "native:reprojectlayer",
+                {
+                    'INPUT': service_pipes_layer_proj,
+                    'TARGET_CRS': pipes_layer_proj.crs(),
+                    'OUTPUT': 'memory:'
+                },
+                context=context,
+                feedback=feedback
+            )['OUTPUT']
+
+        # A cancelled reprojection returns an empty layer -- stop here with a
+        # clear message instead of failing further down on the empty input.
+        if feedback.isCanceled():
+            raise QgsProcessingException("Cancelled -- no files were changed.")
+        if pipes_layer_proj.featureCount() == 0:
+            raise QgsProcessingException("The pipes layer has no features.")
+
         # Define the fields for the output layer
         feedback.pushInfo("Creating the new fields ...")
         fields = QgsFields()
@@ -154,27 +492,30 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         # Set CRS from the service_pipes_layer
         crs = service_pipes_layer_proj.crs()
 
-        # Create a writer for the output layer
-        writer = QgsVectorFileWriter(
-            output_path,
-            "UTF-8",
-            fields,
-            QgsWkbTypes.LineString,
-            crs,
-            "GeoJSON", #"ESRI Shapefile",
-        )
+        # Collected in memory and written in one go at the end -- so no
+        # output file is open while the checks below can still raise (an
+        # open file couldn't be cleaned up after a failure on Windows).
+        out_features = []
+        dat_lines = ["Section\tSDR\tTrace_(m)\tNumber_of_traces\tMax_pressure_loss_(Pa)\tHP_ID_vector\n"]
 
-        if writer.hasError() != QgsVectorFileWriter.NoError:
-            raise QgsProcessingException(f"Error when creating the output shapefile: {writer.errorMessage()}")
-            
-        # Prepare the $length expression
-        expression = QgsExpression('$length')
-        expr_context = QgsExpressionContext()
-        expr_context.appendScopes(QgsExpressionContextUtils.globalProjectLayerScopes(service_pipes_layer_proj))
-        
-        # Open dat file in writing mode and write header        
-        dat_file = open(dat_output_path, "w", encoding="utf-8")
-        dat_file.write("Section\tSDR\tTrace_(m)\tNumber_of_traces\tMax_pressure_loss_(Pa)\tHP_ID_vector\n")
+        # Ellipsoidal, in metres -- a plain $length is planar in CRS units.
+        # Both layers are in the pipes' CRS by now (reprojected above).
+        distance_area = utils.create_distance_area(pipes_layer_proj.crs(), context.transformContext())
+
+        # The heat pump IDs are copied from the buildings layer by Service
+        # Pipes; they link the topology to the heat loads file.
+        if "id_lokalId" not in service_pipes_layer_proj.fields().names():
+            raise QgsProcessingException(
+                "The service pipes layer has no 'id_lokalId' field with the heat pump IDs. "
+                "Run Shortest Service Pipes with a buildings layer that has it (e.g. the "
+                "Get Buildings or Heat Loads output), then run Pipe Topology again."
+            )
+
+        if self.parameterAsBoolean(parameters, self.CROP_NETWORK, context):
+            pipes_layer_proj = self._crop_pipes(
+                parameters, context, feedback, pipes_layer_proj, service_pipes_layer_proj, distance_area,
+                cropped_mains_path,
+            )
 
         # Copy features from the service pipes layer
         feedback.pushInfo("Handling service pipes ...")
@@ -184,13 +525,8 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature = QgsFeature(fields)
             new_feature.setGeometry(feature.geometry())
             
-            # Set the current feature in the expression context
-            expr_context.setFeature(feature)
-        
-            # Evaluate the $length expression
-            Trace_length = expression.evaluate(expr_context)
-            if expression.hasEvalError():
-                raise QgsProcessingException(f"Expression evaluation error: {expression.evalErrorString()}")
+            Trace_length = distance_area.measureLength(feature.geometry())
+            utils.raise_if_nan(Trace_length, "a pipe length")
 
             #Update field values
             new_feature["Section"] = "Service_pipe_" + str(pipeNo)
@@ -198,11 +534,11 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature["Trace_(m)"] = Trace_length
             new_feature["Number_of_traces"] = 1
             new_feature["Max_pressure_loss_(Pa)"] = 180 * Trace_length
-            new_feature["HP_ID_vector"] = feature["id.lokalId"]
-            writer.addFeature(new_feature)
-            
+            new_feature["HP_ID_vector"] = feature["id_lokalId"]
+            out_features.append(new_feature)
+
             # Update dat file
-            dat_file.write(
+            dat_lines.append(
                 f"{new_feature['Section']}\t{new_feature['SDR']}\t"
                 f"{float(new_feature['Trace_(m)']):.2f}\t"  # Explicitly format to 2 decimal places
                 f"{new_feature['Number_of_traces']}\t"
@@ -257,10 +593,8 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature.setGeometry(pipe_feature.geometry())
             
             # Step 1: calculate the length of the current pipe
-            expr_context.setFeature(pipe_feature)
-            Trace_length = expression.evaluate(expr_context)
-            if expression.hasEvalError():
-                raise QgsProcessingException(f"Expression evaluation error: {expression.evalErrorString()}")
+            Trace_length = distance_area.measureLength(pipe_feature.geometry())
+            utils.raise_if_nan(Trace_length, "a pipe length")
             
             
             # Step 2: Retrieve Heat-pump ID's for each pipe
@@ -274,17 +608,15 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             # Collect IDs of the nearby service pipes
             connected_ids = []
             for f in nearby_service_pipes:
-                if "id.lokalId" in f.fields().names():
-                    connected_ids.append(f["id.lokalId"])
-                    feedback.pushInfo(f"Service pipe ID found: {f['id.lokalId']}")
-                else:
-                    feedback.pushInfo("Field 'id.lokalId' not found in feature.")
-                    
-            # Combine IDs into a comma-separated string
-            combined_ids = ", ".join(connected_ids)
-                        
+                connected_ids.append(f["id_lokalId"])
+                feedback.pushInfo(f"Service pipe ID found: {f['id_lokalId']}")
+
+            # Kept as a list (joined only when written out) so an empty
+            # contribution can't leave a stray ", " in the HP_ID_vector.
+            ids_list = [str(hp_id) for hp_id in connected_ids]
+
             # Print or assign the result
-            feedback.pushInfo(f"Pipe ID: {pipe_feature.id()}, Connected Service Pipes: {combined_ids}")
+            feedback.pushInfo(f"Pipe ID: {pipe_feature.id()}, Connected Service Pipes: {', '.join(ids_list)}")
             
             
             # Add HP ID's of lower-level connected pipes
@@ -301,14 +633,11 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                             # Retrieve HP_IDs for the other feature from the processed_features dictionary
                             other_id = other_feature.id()
                             if other_id in processed_features:
-                                higher_level_ids.append(processed_features[other_id])
-                
-                # Combine the higher-level HP_IDs into a single comma-separated string
-                if higher_level_ids:
-                    combined_ids += ", " + ", ".join(higher_level_ids)
-            
+                                higher_level_ids.extend(processed_features[other_id])
+
+                ids_list.extend(higher_level_ids)
+
             # Check for duplicates and issue a warning
-            ids_list = [id.strip() for id in combined_ids.split(",")]  # Split and strip whitespace
             id_counts = Counter(ids_list)  # Count occurrences of each ID
             unique_ids = sorted(set(ids_list))  # Deduplicate and sort
             duplicates = [id for id, count in id_counts.items() if count > 1] # Identify duplicates
@@ -318,7 +647,19 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
                     f"Duplicate HP_IDs found and removed for HP_ID: {', '.join(duplicates)}, make sure this heatpump only connects to one pipe section"
                 )
             
-            # Reconstruct combined_ids as a comma-separated string
+            if not unique_ids:
+                geometry = pipe_feature.geometry()
+                midpoint = geometry.interpolate(geometry.length() / 2).asPoint()
+                raise QgsProcessingException(
+                    f"A main pipe (Level {current_level}, {Trace_length:.1f} m long, "
+                    f"midpoint at {midpoint.x():.1f}, {midpoint.y():.1f} in "
+                    f"{pipes_layer_proj.crs().authid()}) has no heat pumps connected "
+                    "to it or downstream of it -- a pipe carrying no flow can't be "
+                    "dimensioned. This is usually a stretch of the main pipes layer "
+                    "past the last connected building; trim it and re-run Main Pipe "
+                    "Hierarchy and Pipe Topology or the full Build Pipe Network again."
+                )
+
             combined_ids = ", ".join(unique_ids)
 
             # Update the current feature's combined_ids field
@@ -332,14 +673,14 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             new_feature["Number_of_traces"] = 1
             new_feature["Max_pressure_loss_(Pa)"] = 180 * Trace_length
             new_feature["HP_ID_vector"] = combined_ids
-            writer.addFeature(new_feature)
-            
+            out_features.append(new_feature)
+
             # Store the processed feature's HP_IDs in the dictionary
             current_id = pipe_feature.id()
-            processed_features[current_id] = combined_ids
+            processed_features[current_id] = unique_ids
 
             # Update dat file
-            dat_file.write(
+            dat_lines.append(
                 f"{new_feature['Section']}\t{new_feature['SDR']}\t"
                 f"{float(new_feature['Trace_(m)']):.2f}\t"  # Explicitly format to 2 decimal places
                 f"{new_feature['Number_of_traces']}\t"
@@ -348,31 +689,28 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             )
            
         
-        # Finalize the writer and close dat file
-        del writer
-        dat_file.close()
-        
-        # Add the new layer to the QGIS map
+        # Write both outputs now that every check has passed (loading the
+        # layer onto the map happens afterwards, in postProcessAlgorithm)
         feedback.pushInfo("") # Empty line for visibility of output
-        feedback.pushInfo("Adding layer to map ...")
-        new_layer = QgsVectorLayer(output_path, "Pipe Topology", "ogr")
-        if not new_layer.isValid():
-            raise QgsProcessingException(f"Could not load the output file: {output_path}")
-        QgsProject.instance().addMapLayer(new_layer)
+        feedback.pushInfo("Writing output files ...")
+        try:
+            output_handling.write_geojson(output_path, fields, QgsWkbTypes.LineString, crs, out_features)
+        except OSError as exc:
+            raise QgsProcessingException(str(exc)) from exc
+
+        with open(dat_output_path, "w", encoding="utf-8") as dat_file:
+            dat_file.writelines(dat_lines)
 
         feedback.pushInfo("Processing completed successfully.")
-        return {
-            self.OUTPUT: output_path,
-            "DAT_OUTPUT": dat_output_path,
-        }
+
         
-    def _reproject_if_geographic(self, layer, label, target_crs, context, feedback):
-        if not layer.crs().isGeographic():
+    def _reproject_if_not_metric(self, layer, label, target_crs, context, feedback):
+        if not utils.needs_metric_reprojection(layer.crs()):
             feedback.pushInfo(f"{label} is already projected: {layer.crs().authid()}")
             return layer
 
         feedback.pushInfo(
-            f"{label} is in geographic CRS ({layer.crs().authid()}), "
+            f"{label} is not in metres ({layer.crs().authid()}), "
             f"reprojecting to {target_crs.authid()}"
         )
         return processing.run(
@@ -385,6 +723,83 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             context=context,
             feedback=feedback,
         )['OUTPUT']
+
+    
+    def _crop_pipes(
+        self, parameters, context, feedback, pipes_layer, service_pipes_layer, distance_area, cropped_mains_path=None
+    ):
+        """Crop the main pipes (see `_crop_network`), log what changed, return a cropped copy.
+
+        With `cropped_mains_path`, the cropped pipes (with `ellip_length`
+        re-measured) are also written there.
+        """
+        source_layer = self.parameterAsVectorLayer(parameters, self.SOURCE_LAYER, context)
+        node = get_connection_node_geometry(source_layer)
+        if node is None:
+            raise QgsProcessingException(
+                f"The source layer '{source_layer.name()}' has no connection node (a feature "
+                "with 'is_connection_node' set) -- select the Source Placement output."
+            )
+        if source_layer.crs() != pipes_layer.crs():
+            node.transform(QgsCoordinateTransform(source_layer.crs(), pipes_layer.crs(), context.transformContext()))
+
+        has_level = "Level" in pipes_layer.fields().names()
+        pipes = [
+            (feature.id(), feature.geometry(), feature["Level"] if has_level else None)
+            for feature in pipes_layer.getFeatures()
+        ]
+        services = [feature.geometry() for feature in service_pipes_layer.getFeatures()]
+
+        feedback.pushInfo("Removing main pipes without heat pumps ...")
+        kept, report = _crop_network(pipes, services, node.asPoint(), distance_area)
+        for _, _, text in report:
+            feedback.pushInfo(text)
+        removed = [length for action, length, _ in report if action.startswith("Removed")]
+        trimmed = [length for action, length, _ in report if action.startswith("Trimmed")]
+        feedback.pushInfo(
+            f"Removed {len(removed)} main pipe(s) ({sum(removed):.1f} m) and trimmed "
+            f"{len(trimmed)} pipe end(s) ({sum(trimmed):.1f} m in total)."
+        )
+        if not kept:
+            raise QgsProcessingException(
+                "No service pipe connects to any main pipe, so no main pipe is left after "
+                "removing the ones without heat pumps. Check that the service pipes touch "
+                "the main pipes (within 0.1 m)."
+            )
+
+        cropped = QgsVectorLayer(
+            f"{QgsWkbTypes.displayString(pipes_layer.wkbType())}?crs={pipes_layer.crs().authid()}",
+            "cropped main pipes",
+            "memory",
+        )
+        cropped.dataProvider().addAttributes(pipes_layer.fields())
+        cropped.updateFields()
+        features = []
+        for feature in pipes_layer.getFeatures():
+            if feature.id() not in kept:
+                continue
+            geometry = QgsGeometry(kept[feature.id()])
+            if QgsWkbTypes.isMultiType(pipes_layer.wkbType()):
+                geometry.convertToMultiType()
+            new_feature = QgsFeature(cropped.fields())
+            new_feature.setGeometry(geometry)
+            new_feature.setAttributes(feature.attributes())
+            features.append(new_feature)
+        cropped.dataProvider().addFeatures(features)
+
+        if cropped_mains_path:
+            length_index = cropped.fields().indexOf("ellip_length")
+            if length_index >= 0:
+                for feature in features:
+                    feature[length_index] = round(distance_area.measureLength(feature.geometry()), 1)
+            try:
+                output_handling.write_geojson(
+                    cropped_mains_path, cropped.fields(), cropped.wkbType(), cropped.crs(), features
+                )
+            except OSError as exc:
+                raise QgsProcessingException(str(exc)) from exc
+            feedback.pushInfo("Cropped main pipes written for the main pipe hierarchy file.")
+        return cropped
 
     def find_features_within_distance(self, input_feature, reference_layer, distance):
         """
@@ -425,7 +840,8 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         contain lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return '2. Thermonet'
+        return '4. Pipe network steps'
+
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -445,7 +861,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             "ID's are connected to which pipe segment<p> "
             "<p> 2. A service pipes layer containing the service "
             "pipes connecting each building/heatpump to the thermonet. "
-            "This layer should hold the ID's of the heatpumps in a field called 'id.lokalId'. <p> "                
+            "This layer should hold the ID's of the heatpumps in a field called 'id_lokalId'. <p> "                
             " The tool stores the relevant information in new geojson and dat files. <p>"
             "<p> The output dat-file can be used as input for full "
             "dimensioning of the thermonet using pythermonet <p>"

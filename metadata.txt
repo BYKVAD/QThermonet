@@ -6,11 +6,11 @@ version=0.2.0
 author=Jane Lund Andersen/VIA University College
 email=jana@via.dk
 
-about=This plugin serves as a user interface for the pythermonet 'Thermonet Dimensioning Tool' that dimensions the diameters of gridpipes in a thermonet as well as the length of Borehole Heat Exchangers (BHE's) or Horizontal Heat Exchangers (HHE's) supplying the grid. https://github.com/soeb1978/pythermonet. Disclaimer: The authors take no responsibility for the accuracy of results produced using this tool.
+about=This plugin serves as a user interface for the pythermonet 'Thermonet Dimensioning Tool' that dimensions the diameters of gridpipes in a thermonet as well as the length of Borehole Heat Exchangers (BHE's) or Horizontal Heat Exchangers (HHE's) supplying the grid. https://github.com/BYKVAD/pythermonet. Disclaimer: The authors take no responsibility for the accuracy of results produced using this tool.
 
 license=mit
-tracker=https://github.com/jaluan/QThermonet/issues
-repository=https://github.com/jaluan/QThermonet
+tracker=https://github.com/BYKVAD/QThermonet/issues
+repository=https://github.com/BYKVAD/QThermonet
 
 hasProcessingProvider=yes
 
@@ -19,7 +19,7 @@ changelog=Removed reference to non-existing test_algorithm in QThermonet_process
 # Tags are comma separated with spaces allowed
 tags=python, energy, thermonet, heating network, cooling network, ground-source energy
 
-homepage=https://github.com/jaluan/QThermonet
+homepage=https://github.com/BYKVAD/QThermonet
 category=Analysis
 icon=resources/icon.png
 

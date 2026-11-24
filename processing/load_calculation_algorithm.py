@@ -33,7 +33,7 @@ __revision__ = '$Format:%H$'
 import os
 import inspect
 import pandas as pd
-from .. import utils
+from .. import output_handling, utils
 
 from qgis.PyQt.QtGui import QIcon, QColor
 
@@ -60,6 +60,40 @@ from qgis.core import (QgsProcessing,
                        QgsFeature)
 
 
+def _with_geojson_suffix(path):
+    """Append '.geojson' if missing -- the name `save_to_geojson` actually writes."""
+    return path if path.lower().endswith(".geojson") else path + ".geojson"
+
+
+def style_heat_loads(layer):
+    """Apply the default heat-loads styling (red = in the thermonet, grey = not).
+
+    Parameters
+    ----------
+    layer : QgsVectorLayer
+        A freshly loaded heat-loads layer with a 'Thermonet' field.
+
+    """
+    # Set up categorized symbology based on the "Thermonet" field
+    categories = []
+
+    # Define the categories
+    gray_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    myGray = QColor(200, 200, 200)
+    gray_symbol.setColor(myGray)
+    categories.append(QgsRendererCategory("No", gray_symbol, "No"))
+
+    red_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+    myRed = QColor(196, 60, 57)
+    red_symbol.setColor(myRed)
+    categories.append(QgsRendererCategory("Yes", red_symbol, "Yes"))
+
+    # Create and set the categorized renderer
+    renderer = QgsCategorizedSymbolRenderer("Thermonet", categories)
+    if renderer is not None:
+        layer.setRenderer(renderer)
+
+
 class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
     
     #Handle input/output
@@ -72,7 +106,8 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFeatureSource(
                 self.INPUT,
                 self.tr("Input Layer with BBR information:"),
-                [QgsProcessing.TypeVectorPolygon]  # Only accept polygon layers
+                [QgsProcessing.TypeVectorPolygon],  # Only accept polygon layers
+                defaultValue=utils.get_cached_path("buildings_file")
             )
         
         param.setHelp(
@@ -80,7 +115,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             "- Be a polygon layer (e.g., representing building footprints).\n"
             "- Contain the required fields: 'BuildYear', 'BuildCode', "
             " 'BBRArea', and 'BBRUUID'.\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:4326 OR 3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -90,38 +125,68 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 self.tr('Output GeoJSON'),
-                fileFilter="GeoJSON (*.geojson)"
+                fileFilter="GeoJSON (*.geojson)",
+                defaultValue=os.path.join(utils.default_save_directory(), "heat_loads.geojson")
             )
         )
 
-        # Add a checkbox for opening the output file after running
-        self.addParameter(
-            QgsProcessingParameterBoolean(
-                "OPEN_OUTPUT",
-                self.tr("Open output file after running algorithm"),
-                defaultValue=True  # Automatically checked
-            )
-        )
-        
         # 2nd output
         self.addParameter(
             QgsProcessingParameterFileDestination(
                 "DAT_OUTPUT",
                 self.tr("Output DAT file"),
-                fileFilter="DAT files (*.dat)"
+                fileFilter="DAT files (*.dat)",
+                defaultValue=os.path.join(utils.default_save_directory(), "heat_loads.dat")
             )
         )
 
+    def prepareAlgorithm(self, parameters, context, feedback):
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.INPUT):
+            return False
+        paths = [
+            _with_geojson_suffix(self.parameterAsFileOutput(parameters, self.OUTPUT, context)),
+            self.parameterAsFileOutput(parameters, "DAT_OUTPUT", context),
+        ]
+        if not output_handling.confirm_overwrite(paths):
+            feedback.reportError("Cancelled -- no files were changed.")
+            return False
+        return True
+
     def processAlgorithm(self, parameters, context, feedback):
+        output_path = _with_geojson_suffix(self.parameterAsFileOutput(parameters, self.OUTPUT, context))
+        dat_output_path = self.parameterAsFileOutput(parameters, "DAT_OUTPUT", context)
+
+        # Both outputs are written to temp files; swapped in, loaded and
+        # styled after the run succeeds (postProcessAlgorithm).
+        self._outputs = output_handling.OutputSet()
+        geojson_temp_path = self._outputs.add_file(
+            output_path,
+            layer_name="Heat loads",
+            cache_roles=["load_geojson_file"],
+            style_default=style_heat_loads,
+        )
+        dat_temp_path = self._outputs.add_file(dat_output_path, cache_roles=["load_dat_file"])
+        try:
+            self._run(parameters, context, feedback, geojson_temp_path, dat_temp_path)
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return {
+            self.OUTPUT: output_path,
+            "DAT_OUTPUT": dat_output_path,
+        }
+
+    def postProcessAlgorithm(self, context, feedback):
+        self._outputs.commit(feedback)
+        return {}
+
+    def _run(self, parameters, context, feedback, output_path, dat_output_path):
+        """Calculate the heat loads and write both outputs to the given (temp) paths."""
         #Handle input layers
         input_layer = self.parameterAsVectorLayer(
             parameters, self.INPUT, context)
-        output_path = self.parameterAsFileOutput(
-            parameters, self.OUTPUT, context)
-        open_output = self.parameterAsBoolean(
-            parameters, "OPEN_OUTPUT", context)
-        dat_output_path = self.parameterAsFileOutput(
-            parameters, "DAT_OUTPUT", context)
 
         if not input_layer:
             raise QgsProcessingException("Invalid input layer!")
@@ -164,18 +229,19 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             for feature in input_features:
                 thermonet_values.append(feature.attribute("Thermonet"))
              
-        # Step 3: Copy or create id.lokalId field for use as Heatpump ID
+        # Step 3: Copy or create id_lokalId field for use as Heatpump ID
+        # (the Datafordeler WFS's own field name, as Get Buildings writes it)
         lokalId_values = []
-        if not any(field.name() == "id.lokalId" for field in input_fields):
-            feedback.pushInfo("'id.lokalId' field not found, assigning unique IDs...")
+        if not any(field.name() == "id_lokalId" for field in input_fields):
+            feedback.pushInfo("'id_lokalId' field not found, assigning unique IDs...")
             feature_count = 0
             for feature in input_features:  # Update existing features
                 feature_count += 1
                 lokalId_values.append(f"{str(feature_count)}")
         else:
-            feedback.pushInfo("Copying 'id.lokalId' features...")
+            feedback.pushInfo("Copying 'id_lokalId' features...")
             for feature in input_features:
-                lokalId_values.append(feature.attribute("id.lokalId"))
+                lokalId_values.append(feature.attribute("id_lokalId"))
         
         # Step 4: Copy BBR information
         BuildYear_values = []
@@ -211,7 +277,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
             BuildYear_values, BuildCode_values, BBRArea_values, thermonet_values, feedback)
         
         # Step 6: Create updated features
-        updated_fields.append(QgsField("id.lokalId", QMetaType.Type.QString))
+        updated_fields.append(QgsField("id_lokalId", QMetaType.Type.QString))
         updated_fields.append(QgsField("BBRUUID", QMetaType.Type.QString))
         updated_fields.append(QgsField("Thermonet", QMetaType.Type.QString))
         updated_fields.append(QgsField("BuildYear", QMetaType.Type.Int, "integer", len=4))
@@ -231,7 +297,7 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         
             # Combine attributes
             attributes = [None] * len(updated_fields)
-            attributes[updated_fields.indexOf("id.lokalId")] = lokalId_values[idx] if idx < len(lokalId_values) else None
+            attributes[updated_fields.indexOf("id_lokalId")] = lokalId_values[idx] if idx < len(lokalId_values) else None
             attributes[updated_fields.indexOf("BBRUUID")] = bbruuid_values[idx] if idx < len(bbruuid_values) else None
             attributes[updated_fields.indexOf("Thermonet")] = thermonet_values[idx] if idx < len(thermonet_values) else None
             attributes[updated_fields.indexOf("BuildYear")] = BuildYear_values[idx] if idx < len(BuildYear_values) else None
@@ -253,21 +319,14 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         
         feedback.pushInfo("Saving to output geojson file...")
         # Use filtered_features for saving the GeoJSON
-        self.save_to_geojson(updated_fields, filtered_features, 
-                             output_path, input_layer, feedback)
+        self.save_to_geojson(updated_fields, filtered_features,
+                             output_path, input_layer)
 
         # self.save_to_geojson(updated_fields, updated_features, 
         #                      output_path, input_layer, feedback)
 
         # Step 8: Open dat file in writing mode and write header and content
         feedback.pushInfo("Writing dat file ...")
-        dat_file = open(dat_output_path, "w", encoding="utf-8")
-        dat_file.write(
-            "Heat_pump_ID\tYearly_heating_load_(W)\tWinter_heating_load_(W)\tDaily_heating_load_(W)\t"
-            "Year_COP\tWinter_COP\tHour_COP\tdT_HP_Heating\tYearly_cooling_load_(W)\tSummer_cooling_load_(W)\t"
-            "Daily_cooling_load_(W)\tEER\tdT_HP_Cooling\n"
-        )
-
         # temporary hardcoded values
         Yr_COP = 3.3
         Winter_COP = 3.4
@@ -279,79 +338,44 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         EER = 0.0
         dT_HP_Cooling = 0
 
-        for feature in updated_features:
-            thermonet_value = feature["Thermonet"] if "Thermonet" in feature.fields(
-            ).names() else None
-            if thermonet_value and str(thermonet_value).lower() == "yes":
-                dat_file.write(
-                    f"{feature['id.lokalId']}\t"
-                    f"{int(round(feature['YrHeatLoad']))}\t"
-                    f"{int(round(feature['WiHeatLoad']))}\t"
-                    f"{int(round(feature['DyHeatLoad']))}\t"
-                    f"{float(Yr_COP):.1f}\t"
-                    f"{float(Winter_COP):.1f}\t"
-                    f"{float(Hour_COP):.1f}\t"
-                    f"{float(dT_HP_Heating):.1f}\t"
-                    f"{int(round(Year_CoolLoad))}\t"
-                    f"{int(round(Summer_CoolLoad))}\t"
-                    f"{int(round(daily_CoolLoad))}\t"
-                    f"{float(EER):.1f}\t"
-                    f"{float(dT_HP_Cooling):.1f}\n"
-                )
+        with open(dat_output_path, "w", encoding="utf-8") as dat_file:
+            dat_file.write(
+                "Heat_pump_ID\tYearly_heating_load_(W)\tWinter_heating_load_(W)\tDaily_heating_load_(W)\t"
+                "Year_COP\tWinter_COP\tHour_COP\tdT_HP_Heating\tYearly_cooling_load_(W)\tSummer_cooling_load_(W)\t"
+                "Daily_cooling_load_(W)\tEER\tdT_HP_Cooling\n"
+            )
 
-        dat_file.close()
-
-        # Step 9: Open the output file if the checkbox is checked
-        if open_output:
-            feedback.pushInfo("Opening output file...")
-            # Extract the file name without extension to use as the layer name
-            import os
-            layer_name = os.path.splitext(os.path.basename(output_path))[0]
-            layer = QgsVectorLayer(output_path, layer_name, "ogr")
-            if not layer.isValid():
-                raise QgsProcessingException(
-                    "Could not load the output layer!")
-
-            # Add the layer to the QGIS project
-            QgsProject.instance().addMapLayer(layer)
-
-            # Set up categorized symbology based on the "Thermonet" field
-            feedback.pushInfo("Applying symbology...")
-            categories = []
-
-            # Define the categories
-            gray_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            myGray = QColor(200, 200, 200)
-            gray_symbol.setColor(myGray)
-            categories.append(QgsRendererCategory("No", gray_symbol, "No"))
-
-            red_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            myRed = QColor(196, 60, 57)
-            red_symbol.setColor(myRed)
-            categories.append(QgsRendererCategory("Yes", red_symbol, "Yes"))
-
-            # Create and set the categorized renderer
-            renderer = QgsCategorizedSymbolRenderer("Thermonet", categories)
-            if renderer is not None:
-                layer.setRenderer(renderer)
-                layer.triggerRepaint()
+            for feature in updated_features:
+                thermonet_value = feature["Thermonet"] if "Thermonet" in feature.fields(
+                ).names() else None
+                if thermonet_value and str(thermonet_value).lower() == "yes":
+                    dat_file.write(
+                        f"{feature['id_lokalId']}\t"
+                        f"{int(round(feature['YrHeatLoad']))}\t"
+                        f"{int(round(feature['WiHeatLoad']))}\t"
+                        f"{int(round(feature['DyHeatLoad']))}\t"
+                        f"{float(Yr_COP):.1f}\t"
+                        f"{float(Winter_COP):.1f}\t"
+                        f"{float(Hour_COP):.1f}\t"
+                        f"{float(dT_HP_Heating):.1f}\t"
+                        f"{int(round(Year_CoolLoad))}\t"
+                        f"{int(round(Summer_CoolLoad))}\t"
+                        f"{int(round(daily_CoolLoad))}\t"
+                        f"{float(EER):.1f}\t"
+                        f"{float(dT_HP_Cooling):.1f}\n"
+                    )
 
         feedback.pushInfo("Processing completed successfully.")
-        return {
-            self.OUTPUT: output_path,
-            "DAT_OUTPUT": dat_output_path,
-        }
 
 
-    def save_to_geojson(self, fields, updated_features, output_path, input_layer, feedback):
+    def save_to_geojson(self, fields, updated_features, output_path, input_layer):
         """
         Saves updated features with new fields to a GeoJSON file.
-    
+
         :param fields: QgsFields containing the updated field definitions.
         :param updated_features: The list of updated QgsFeature.
         :param output_path: Path to save the output GeoJSON.
         :param input_layer: The input layer for CRS and geometry type.
-        :param feedback: Feedback object for progress reporting.
         """
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = "GeoJSON"  # Specify GeoJSON driver
@@ -386,8 +410,6 @@ class LoadCalculationAlgorithm(QgsProcessingAlgorithm):
         error_code = error[0] if isinstance(error, tuple) else error
         if error_code != QgsVectorFileWriter.NoError:
             raise QgsProcessingException("Failed to create output GeoJSON.")
-
-        feedback.pushInfo(f"Output GeoJSON saved to: {output_path}")
         
 
     def calc_heat_loads(self, BuildYear_values, BuildCode_values, BBRArea_values, Thermonet, feedback):

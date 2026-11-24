@@ -28,9 +28,12 @@ __copyright__ = '(C) 2025 by Jane Lund Andersen/VIA University College'
 
 
 from qgis.core import (
+    QgsCoordinateReferenceSystem,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterDefinition,
     QgsProcessingParameterVectorLayer,
     QgsProcessingParameterFileDestination,
     QgsProject,
@@ -39,7 +42,6 @@ from qgis.core import (
     QgsFields,
     QgsWkbTypes,
     QgsSpatialIndex,
-    QgsDistanceArea,
     QgsFeatureRequest,
     QgsField,
     QgsPointXY,
@@ -53,10 +55,53 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QIcon
+from qgis import processing
 import os
 import inspect
-from .. import utils
-from osgeo import ogr
+from .. import output_handling, utils
+
+
+def style_service_pipes(layer):
+    """Apply the default service-pipe styling (black line, red dot at the building end).
+
+    Parameters
+    ----------
+    layer : QgsVectorLayer
+        A freshly loaded service pipes layer.
+
+    """
+    if layer.geometryType() == QgsWkbTypes.LineGeometry:
+
+        # Create the main line symbol
+        line_symbol = QgsLineSymbol.createSimple({
+            'color': 'black',  # Line color
+            'width': '0.46',  # Line width
+        })
+
+        # Create a geometry generator for the start point
+        geometry_generator_props = {
+            'GeometryType': 'Point',              # Output geometry type
+            'OutputType': 'Point'
+        }
+
+        geometry_generator = QgsGeometryGeneratorSymbolLayer.create(geometry_generator_props)
+        geometry_generator.setGeometryExpression('start_point(@geometry)')
+
+        # Configure the marker symbol for the geometry generator
+        marker_symbol = QgsMarkerSymbol.createSimple({
+            'color': 'red',         # Fill color for the circle
+            'outline_color': 'black',  # Outline color
+            'outline_width': '0.2',  # Outline width
+            'size': '2.0'           # Circle size
+        })
+        geometry_generator.setSubSymbol(marker_symbol)  # Apply marker symbol
+
+        # Add the geometry generator to the line symbol
+        line_symbol.appendSymbolLayer(geometry_generator)
+
+        # Set the layer's renderer to use the composed symbol
+        layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
+
 
 class ServicePipesAlgorithm(QgsProcessingAlgorithm):
     
@@ -64,6 +109,10 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
     BUILDINGS_LAYER = "BUILDINGS_LAYER"
     PIPES_LAYER = "PIPES_LAYER"
     OUTPUT_LAYER = "OUTPUT_LAYER"
+    #: Hidden; `True` when Build Pipe Network runs this tool as one of its
+    #: steps -- then no overwrite pop-up, no temp-file swap, no path caching
+    #: and no layer loading (see output_handling.OutputSet's step mode).
+    RUN_AS_STEP = "RUN_AS_STEP"
 
     def initAlgorithm(self, config=None):
         
@@ -72,15 +121,16 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             self.BUILDINGS_LAYER,
             "Select the Buildings Layer",
             [QgsProcessing.TypeVectorPolygon],
+            defaultValue=utils.get_cached_path("load_geojson_file") or utils.get_cached_path("buildings_file"),
         )
 
         param.setHelp(
             "The input layer must:\n"
             "- Be a polygon layer (e.g., representing building footprints).\n"
-            "- Contain the required fields: 'Thermonet' and 'id.lokalId'.\n"
+            "- Contain the required fields: 'Thermonet' and 'id_lokalId'.\n"
             "- Optionally contain 'YrHeatLoad', 'WiHeatLoad', 'DyHeatLoad' "
             "(passed through to the output when present).\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -90,6 +140,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             self.PIPES_LAYER,
             "Select the Pipes Layer",
             [QgsProcessing.TypeVectorLine],
+            defaultValue=utils.get_cached_path("mains_file"),
         )
 
         param.setHelp(
@@ -98,7 +149,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             "- Contain the required fields: 'id' and 'Level'.\n"
             "- The 'Level' field should contain the hierarchy of the pipes "
             "(integers 1:1:N, where 1=main pipe, N=lowest-level pipe).\n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857)."
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
@@ -107,32 +158,110 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         param = QgsProcessingParameterFileDestination(
                 self.OUTPUT_LAYER,
                 "Output Service Pipes",
-                fileFilter="GeoJSON (*.geojson)"
+                fileFilter="GeoJSON (*.geojson)",
+                defaultValue=os.path.join(utils.default_save_directory(), "service_pipes.geojson")
             )
         param.setHelp(
             "The output layer will contain the shortest distance service pipes "
             "between each building and the nearest point on the nearest pipe.\n"
-            "- It has a fixed schema: 'id.lokalId', 'Thermonet', 'YrHeatLoad', "
+            "- It has a fixed schema: 'id_lokalId', 'Thermonet', 'YrHeatLoad', "
             "'WiHeatLoad', 'DyHeatLoad', 'ellip_length'.\n"
             "- It is an essential input to the 'Pipe Topology' tool."
             )
         self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(self.RUN_AS_STEP, "Run as a step", defaultValue=False)
+        param.setFlags(param.flags() | QgsProcessingParameterDefinition.FlagHidden)
+        self.addParameter(param)
         
+    def prepareAlgorithm(self, parameters, context, feedback):
+        if not utils.prepare_algorithm_project_setup(self, parameters, context, feedback, self.BUILDINGS_LAYER):
+            return False
+        if not self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context):
+            output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_LAYER, context)
+            if not output_handling.confirm_overwrite([output_path]):
+                feedback.reportError("Cancelled -- no files were changed.")
+                return False
+        return True
+
     def processAlgorithm(self, parameters, context, feedback):
-        
+        output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_LAYER, context)
+        self._outputs = output_handling.OutputSet(
+            step_mode=self.parameterAsBoolean(parameters, self.RUN_AS_STEP, context)
+        )
+        temp_path = self._outputs.add_file(
+            output_path,
+            layer_name="Service pipes",
+            cache_roles=["service_pipes_file"],
+            style_default=style_service_pipes,
+        )
+        try:
+            self._run(parameters, context, feedback, temp_path)
+            # A cancelled run stops the building loop early -- never commit
+            # that half-finished file.
+            if feedback.isCanceled():
+                raise QgsProcessingException("Cancelled -- no files were changed.")
+        except Exception:
+            self._outputs.discard()
+            raise
+        return {self.OUTPUT_LAYER: output_path}
+
+    def postProcessAlgorithm(self, context, feedback):
+        self._outputs.commit(feedback)
+        return {}
+
+    def _run(self, parameters, context, feedback, output_path):
+        """Build the service pipes and write them to `output_path` (a temp path)."""
         feedback.pushInfo("Checking input files ...")
         buildings_layer = self.parameterAsVectorLayer(parameters, self.BUILDINGS_LAYER, context)
         pipes_layer = self.parameterAsVectorLayer(parameters, self.PIPES_LAYER, context)
-        
+
         if not buildings_layer or not pipes_layer:
             raise QgsProcessingException("Invalid input layers!")
-            
+
+        # Reproject to a consistent, projected CRS if needed -- the
+        # nearest-point calculation below (and the "ellipsoidal"
+        # QgsDistanceArea measurement built on top of it) silently produces
+        # meaningless results if buildings_layer and pipes_layer are in
+        # different CRSs (confirmed: get_buildings_and_bbr_algorithm.py and
+        # main_pipe_hierarchy_algorithm.py didn't always agree on one).
+        # Defense-in-depth, matching the same pattern already used in
+        # main_pipe_hierarchy_algorithm.py/pipe_topology_algorithm.py, in
+        # case this tool is ever fed layers from elsewhere.
+        default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
+
+        # Each layer independently escapes a non-metric CRS (degrees or
+        # EPSG:3857) first (both towards the same target, so they naturally
+        # agree afterwards)...
+        buildings_layer = self._reproject_if_not_metric(
+            buildings_layer, "Buildings layer", default_projected_crs, context, feedback
+        )
+        pipes_layer = self._reproject_if_not_metric(
+            pipes_layer, "Pipes layer", default_projected_crs, context, feedback
+        )
+
+        # ...then a final check catches the remaining case: both were
+        # already projected (so neither branch above ran), but in two
+        # different projected CRSs.
+        if buildings_layer.crs() != pipes_layer.crs():
+            feedback.pushInfo(
+                f"Buildings layer ({buildings_layer.crs().authid()}) and pipes layer "
+                f"({pipes_layer.crs().authid()}) are in different CRSs, reprojecting "
+                f"buildings layer to match pipes layer."
+            )
+            buildings_layer = processing.run(
+                "native:reprojectlayer",
+                {'INPUT': buildings_layer, 'TARGET_CRS': pipes_layer.crs(), 'OUTPUT': 'memory:'},
+                context=context,
+                feedback=feedback,
+            )['OUTPUT']
+
         # Validate required fields on inputs up front so we fail before the
         # processing loop rather than crashing deep inside feature iteration.
         building_field_names = [field.name() for field in buildings_layer.fields()]
         pipe_field_names = [field.name() for field in pipes_layer.fields()]
 
-        required_building_fields = ["Thermonet", "id.lokalId"]
+        required_building_fields = ["Thermonet", "id_lokalId"]
         missing_building_fields = [
             f for f in required_building_fields if f not in building_field_names
         ]
@@ -157,23 +286,14 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         if not buildings:
             raise QgsProcessingException("No buildings with 'Thermonet' field set to 'Yes' found!")
         
-        # Check if the output file is locked
-        feedback.pushInfo("Checking output file destination ...")
-        output_path = self.parameterAsFileOutput(parameters, self.OUTPUT_LAYER, context)
-        if self.is_file_locked(output_path, feedback):
-            raise QgsProcessingException(
-                f"The output file '{output_path}' is locked by QGIS and cannot be overwritten. "
-                "Please select another output file name or restart QGIS to remove the lock."
-            )
-    
         # Prepare output fields
         feedback.pushInfo("Preparing output fields ...")
 
         # Fixed schema: deterministic across runs regardless of what extra
         # columns the inputs happen to carry. Downstream consumers only need
-        # 'id.lokalId'; the rest are user-facing / inspection fields.
+        # 'id_lokalId'; the rest are user-facing / inspection fields.
         field_definitions = [
-            ("id.lokalId",   QMetaType.Type.QString, 255, 0),
+            ("id_lokalId",   QMetaType.Type.QString, 255, 0),
             ("Thermonet",    QMetaType.Type.QString, 10,  0),
             ("YrHeatLoad",   QMetaType.Type.Double,  10,  0),
             ("WiHeatLoad",   QMetaType.Type.Double,  10,  0),
@@ -204,10 +324,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo("Building spatial index for pipes...")
         spatial_index = QgsSpatialIndex(pipes_layer.getFeatures())
         
-        # Set up the distance calculator
-        distance_calculator = QgsDistanceArea()
-        distance_calculator.setSourceCrs(buildings_layer.sourceCrs(), context.transformContext())
-        distance_calculator.setEllipsoid(context.project().ellipsoid())
+        # On the data CRS's own ellipsoid, not the project's setting (which
+        # can be "NONE", i.e. planar in CRS units)
+        distance_calculator = utils.create_distance_area(buildings_layer.sourceCrs(), context.transformContext())
         
         # Process each building
         feedback.pushInfo("Finding shortest service pipe for each building...")
@@ -257,7 +376,7 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         
             new_feature = QgsFeature(output_fields)
             new_feature.setGeometry(QgsGeometry.fromPolylineXY([start_point, end_point]))
-            new_feature["id.lokalId"]   = building["id.lokalId"]
+            new_feature["id_lokalId"]   = building["id_lokalId"]
             new_feature["Thermonet"]    = building["Thermonet"]
             new_feature["YrHeatLoad"]   = building["YrHeatLoad"]           if has_yr    else None
             new_feature["WiHeatLoad"]   = building["WiHeatLoad"]           if has_wi    else None
@@ -283,57 +402,25 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         if error_code != QgsVectorFileWriter.NoError:
             raise QgsProcessingException(f"Failed to write output layer. Error: {error}")
 
-        # Load the written file and apply symbology
-        output_layer = QgsVectorLayer(output_path, "Service pipes", "ogr")
-        if output_layer.isValid():
-            feedback.pushInfo("Applying symbology to layer...")
-            QgsProject.instance().addMapLayer(output_layer)
-            self.set_symbology(output_layer, feedback)
-            feedback.pushInfo("Layer successfully created and symbology applied.")
-        else:
-            feedback.pushInfo("Output layer is not valid, symbology not applied")
-
         feedback.pushInfo("Processing completed.")
-        return {self.OUTPUT_LAYER: output_path}
-    
-            
-    def set_symbology(self, layer, feedback):
-        """Set symbology for the service pipes layer."""
-        if layer.geometryType() == QgsWkbTypes.LineGeometry:
-            
-            # Create the main line symbol
-            line_symbol = QgsLineSymbol.createSimple({
-                'color': 'black',  # Line color
-                'width': '0.46',  # Line width
-            })
-    
-            # Create a geometry generator for the start point
-            geometry_generator_props = {
-                'GeometryType': 'Point',              # Output geometry type
-                'OutputType': 'Point'
-            }
-            
-            geometry_generator = QgsGeometryGeneratorSymbolLayer.create(geometry_generator_props)
-            geometry_generator.setGeometryExpression('start_point(@geometry)')
-            
-            # Configure the marker symbol for the geometry generator
-            marker_symbol = QgsMarkerSymbol.createSimple({
-                'color': 'red',         # Fill color for the circle
-                'outline_color': 'black',  # Outline color
-                'outline_width': '0.2',  # Outline width
-                'size': '2.0'           # Circle size
-            })
-            geometry_generator.setSubSymbol(marker_symbol)  # Apply marker symbol
-    
-            # Add the geometry generator to the line symbol
-            line_symbol.appendSymbolLayer(geometry_generator)
-    
-            # Set the layer's renderer to use the composed symbol
-            layer.setRenderer(QgsSingleSymbolRenderer(line_symbol))
-    
-            # Refresh the layer to apply the changes
-            layer.triggerRepaint()
-                   
+
+
+    def _reproject_if_not_metric(self, layer, label, target_crs, context, feedback):
+        if not utils.needs_metric_reprojection(layer.crs()):
+            return layer
+
+        feedback.pushInfo(
+            f"{label} is not in metres ({layer.crs().authid()}), "
+            f"reprojecting to {target_crs.authid()}"
+        )
+        return processing.run(
+            "native:reprojectlayer",
+            {'INPUT': layer, 'TARGET_CRS': target_crs, 'OUTPUT': 'memory:'},
+            context=context,
+            feedback=feedback,
+        )['OUTPUT']
+
+
     def calculate_distance_between_geometries(self, building_geom, pipe_geom, distance_calculator, feedback):
         """
         Calculate the shortest distance between the nearest point on the building and the nearest point on the pipe.
@@ -383,6 +470,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
 
                 # Calculate the distance using the ellipsoid method
                 distance = distance_calculator.measureLine(QgsPointXY(building_point), QgsPointXY(pipe_point))
+                # A NaN here made every comparison below false, so every
+                # building was skipped and an empty layer written (2026-10-01).
+                utils.raise_if_nan(distance, "a building-to-pipe distance")
 
                 # Update the shortest distance and nearest points
                 if distance < shortest_distance:
@@ -392,31 +482,6 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
 
         return shortest_distance, building_nearest_point, pipe_nearest_point, feedback
 
-    def is_file_locked(self, file_path, feedback):
-        """Check if a file is locked by attempting to access it and provide detailed feedback."""
-        if os.path.exists(file_path):
-            feedback.pushInfo(f"File exists at path: {file_path}")
-            
-            # Try opening the file in append mode to check for basic locks
-            try:
-                with open(file_path, "a"):
-                    feedback.pushInfo("File is not locked at the operating system level.")
-            except (OSError, IOError) as e:
-                feedback.pushInfo(f"File is locked at the OS level. Error encountered: {e}")
-                return True
-            
-            # OGR-specific test for file access
-            ogr_ds = ogr.Open(file_path, update=1)  # Open in write mode
-            if ogr_ds is None:
-                feedback.pushInfo("OGR reports the file is locked or inaccessible.")
-                return True
-            else:
-                feedback.pushInfo("OGR reports the file is accessible.")
-                ogr_ds = None  # Close the data source properly
-                return False
-        else:
-            feedback.pushInfo(f"File does not exist at path: {file_path}.")
-            return False  # File doesn't exist, so it can't be locked
 
 
     def name(self):
@@ -444,7 +509,8 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         contain lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return '2. Thermonet'
+        return '4. Pipe network steps'
+
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)

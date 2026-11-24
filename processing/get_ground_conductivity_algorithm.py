@@ -31,7 +31,6 @@ __copyright__ = '(C) 2026 by Jane Lund Andersen/VIA University College'
 __revision__ = '$Format:%H$'
 
 import os
-import requests as rq
 import inspect
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -42,11 +41,25 @@ from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterFile,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterFolderDestination
     )
-from ..utils import calculate_tc, fetch_api_data, get_representative_point, get_logo
+from pythermonet.input import load_settings
+from .. import output_handling
+from ..utils import (
+    calculate_tc,
+    default_save_directory,
+    fetch_api_data,
+    get_cached_path,
+    get_current_settings_path,
+    get_logo,
+    get_representative_point,
+    maybe_prompt_project_setup,
+    update_settings_fields,
+)
 
 
 class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
@@ -54,22 +67,28 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
     #Handle input/output
     INPUT_AREA = 'INPUT_AREA'
     DEPTH = 'DEPTH'
+    SETTINGS_FILE = 'SETTINGS_FILE'
+    UPDATE_THERMAL_CONDUCTIVITY = 'UPDATE_THERMAL_CONDUCTIVITY'
 
     def initAlgorithm(self, config=None):
         
         # 1st input
         param = QgsProcessingParameterFeatureSource(
                 self.INPUT_AREA,
-                "AOI (a single polygon, line, or point)",
+                "AOI, or source layer (polygon, line, or point)",
                 [QgsProcessing.TypeVectorPolygon,
                  QgsProcessing.TypeVectorLine,
-                 QgsProcessing.TypeVectorPoint]  # Only accept polygon, polyline, or point layers
+                 QgsProcessing.TypeVectorPoint],  # Only accept polygon, polyline, or point layers
+                defaultValue=get_cached_path("source_file")
             )
         param.setHelp(
             "The input layer must:\n"
-            "- Be a polygon, line, or point layer (shape or geojson format). \n"
-            "- Contain a single feature with the Area-Of-Interest. \n"
-            "- Use a compatible CRS (preferably WGS84/EPSG:3857 or 4326)."
+            "- Be a polygon, line, or point layer (shape or geojson format).\n"
+            "- Be either a single-feature AOI polygon, or the 'Source Placement' "
+            "tool's output (a BHE borefield point layer or an HHE trench line "
+            "layer) -- any number of features is fine; the ground conductivity "
+            "is computed at the combined centroid of all of them.\n"
+            "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
         self.addParameter(param)
 
@@ -87,11 +106,46 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             "- It is defined from the ground surface with positive values downwards"
         )
         self.addParameter(param)
-        
+
+        # Optional: settings file to update with the resulting value
+        param = QgsProcessingParameterFile(
+                self.SETTINGS_FILE,
+                "Settings file to update (optional)",
+                extension="json",
+                optional=True,
+                defaultValue=get_current_settings_path()
+            )
+        param.setHelp(
+            "Project settings file (.json) created/edited with the "
+            "'Dimensioning Settings' tool. When given, the ground thermal "
+            "conductivity computed at the AOI's center point (this tool's "
+            "primary result, not the spatial-sensitivity offset points) can "
+            "overwrite soil.thermal_conductivity in this file -- see "
+            "'Overwrite soil.thermal_conductivity' below. Leave empty to "
+            "just get the report, as before.\n"
+        )
+        self.addParameter(param)
+
+        param = QgsProcessingParameterBoolean(
+                self.UPDATE_THERMAL_CONDUCTIVITY,
+                "Overwrite soil.thermal_conductivity in the settings file",
+                defaultValue=True
+            )
+        param.setHelp(
+            "Only used when a settings file is given above. When checked, "
+            "the computed ground thermal conductivity is written back into "
+            "the settings file's Soil block -- this overwrites the value on "
+            "disk, not just for this run. This is the deep/bulk value BHE "
+            "dimensioning uses; it does not touch the separate shallow "
+            "values HHE dimensioning reads.\n"
+        )
+        self.addParameter(param)
+
         # 3rd input (output folder)
         param = QgsProcessingParameterFolderDestination(
             'OUTPUT_FOLDER',
-            'Output folder'
+            'Output folder',
+            defaultValue=default_save_directory()
         )
         param.setHelp('Folder where the output PNG figures will be saved.')
         self.addParameter(param)
@@ -102,12 +156,34 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         input_area_layer = self.parameterAsVectorLayer(parameters, self.INPUT_AREA, context)
         input_depth = self.parameterAsInt(parameters, self.DEPTH, context)
         output_folder = self.parameterAsString(parameters, 'OUTPUT_FOLDER', context)
+        # An emptied field means "no settings file" (see its help text) --
+        # checked on the raw value, since parameterAsFile falls back to the
+        # default (the active settings file) for "" and None (2026-10-15).
+        if self.SETTINGS_FILE in parameters and not parameters[self.SETTINGS_FILE]:
+            settings_path = ""
+        else:
+            settings_path = self.parameterAsFile(parameters, self.SETTINGS_FILE, context)
+        update_thermal_conductivity = self.parameterAsBoolean(
+            parameters, self.UPDATE_THERMAL_CONDUCTIVITY, context
+        )
+
+        maybe_prompt_project_setup(
+            None, crs=input_area_layer.crs(), point=input_area_layer.extent().center(), feedback=feedback
+        )
 
         # Step 1: Calculate the center coordinates of the AOI input (EPSG:25832)
         feedback.pushInfo("Calculating input coordinates...")
         centerX, centerY = get_representative_point(input_area_layer)
         feedback.pushInfo(f"Coordinates (EPSG:25832): X={centerX}, Y={centerY}")
-        
+
+        # The figure's file name depends only on the center point and depth,
+        # so ask about overwriting now -- before the ~10 GEUS requests, not
+        # after them. Safe here: this algorithm runs on the main thread
+        # (FlagNoThreading, see flags()).
+        out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}_{input_depth}m.png")
+        if not output_handling.confirm_overwrite([out_path]):
+            raise QgsProcessingException("Cancelled -- no files were changed.")
+
         # #Hardcode for temporary check
         # centerX = 520000
         # centerY = 6200000
@@ -132,22 +208,22 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo(f"{layer['name']}: {layer['top']}m.b.g. to {layer['bottom']}m.b.g.")
 
 
-       	# Step 3: Unpack the json data structure and create a figure of the local geology
-       	layers      = data["layers"]
-       	groundlevel = data["groundlevel"]
-       	phreatic    = data["phreatic"]
+        # Step 3: Unpack the json data structure and create a figure of the local geology
+        layers      = data["layers"]
+        groundlevel = data["groundlevel"]
+        phreatic    = data["phreatic"]
        
-       	# Define colors (random for now, later use GEUS standard colors)
-       	unique_names = list({layer["name"] for layer in layers})
-       	cmap         = plt.get_cmap("tab20", len(unique_names))
-       	colour_map   = {name: cmap(i) for i, name in enumerate(unique_names)}
+        # Define colors (random for now, later use GEUS standard colors)
+        unique_names = list({layer["name"] for layer in layers})
+        cmap         = plt.get_cmap("tab20", len(unique_names))
+        colour_map   = {name: cmap(i) for i, name in enumerate(unique_names)}
        
-       	# Initiate figure
-       	# fig, (ax_a, ax_b) = plt.subplots(
-        #    	1, 2,
-        #    	figsize       = (10, 11),
-        #    	gridspec_kw   = {"wspace": 0.45},
-       	# )
+        # Initiate figure
+        # fig, (ax_a, ax_b) = plt.subplots(
+        #       1, 2,
+        #       figsize       = (10, 11),
+        #       gridspec_kw   = {"wspace": 0.45},
+        # )
         fig = plt.figure(figsize=(13, 11))
         gs  = GridSpec(
             1, 5,
@@ -163,38 +239,38 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ax_b    = fig.add_subplot(gs[0, 3])
         ax_b_tc = fig.add_subplot(gs[0, 4])
         
-       	fig.suptitle(
-           	f"Geological Depth Profile  |  X={centerX}, Y={centerY}",
-           	fontsize=11, fontweight="bold", y=0.98,
-       	)
+        fig.suptitle(
+                f"Geological Depth Profile  |  X={centerX}, Y={centerY}",
+                fontsize=11, fontweight="bold", y=0.98,
+        )
        
         
-       	# Fig. 1A: Full geological profile (upper 1 km)
-       	panel_a_top    = groundlevel
+        # Fig. 1A: Full geological profile (upper 1 km)
+        panel_a_top    = groundlevel
         panel_a_bottom = groundlevel - 1000 # max(l["bottom"] for l in layers)
-       	self.draw_panel(
-           	ax_a, layers, groundlevel, phreatic, colour_map,
-           	y_min_elev = panel_a_top,
-           	y_max_elev = panel_a_bottom,
-           	title      = "Panel A – Upper 1 km", 
+        self.draw_panel(
+                ax_a, layers, groundlevel, phreatic, colour_map,
+                y_min_elev = panel_a_top,
+                y_max_elev = panel_a_bottom,
+                title      = "Panel A – Upper 1 km", 
              feedback   = feedback
              )
         self.draw_tc_panel(ax_a_tc, layers, groundlevel, panel_a_top, panel_a_bottom) #feedback
-    	
-       	# Fig. 1B: Zoom-in on geology down to depth that came with user input
-       	panel_b_top    = groundlevel
+        
+        # Fig. 1B: Zoom-in on geology down to depth that came with user input
+        panel_b_top    = groundlevel
         panel_b_bottom = groundlevel - input_depth      # depth metres below surface
-       	self.draw_panel(
-           	ax_b, layers, groundlevel, phreatic, colour_map,
-           	y_min_elev = panel_b_top,
-           	y_max_elev = panel_b_bottom,
-           	title      = f"Panel B – Upper {input_depth} m",
+        self.draw_panel(
+                ax_b, layers, groundlevel, phreatic, colour_map,
+                y_min_elev = panel_b_top,
+                y_max_elev = panel_b_bottom,
+                title      = f"Panel B – Upper {input_depth} m",
              feedback   = feedback
-       	)
+        )
         self.draw_tc_panel(ax_b_tc, layers, groundlevel, panel_b_top, panel_b_bottom) #feedback
        
-       	# legend
-       	# Sort unique names by their top value (shallowest first)
+        # legend
+        # Sort unique names by their top value (shallowest first)
         sorted_names = sorted(unique_names, key=lambda name: next(l["top"] for l in layers if l["name"] == name))
         
         patches = [
@@ -203,7 +279,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         ]
                      
        
-       	# Step 4: Calculate ground thermal conductivity based on json output and check spatial sensitivity          
+        # Step 4: Calculate ground thermal conductivity based on json output and check spatial sensitivity          
         offset     = 500  # metres
         offsets    = [
             ( 0,       0),       # center
@@ -222,7 +298,6 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
             x  = centerX + dx
             y  = centerY + dy
             tc = calculate_tc(x, y, input_depth) #function located in utils.py
-            # tc = self.calculate_tc_internal(x, y, input_depth, feedback) #function located below
             if tc is not None:
                 tc_values.append(tc)
                 feedback.pushInfo(f"  TC at ({x}, {y}): {tc:.2f} W/m·K")
@@ -311,12 +386,50 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         fig.subplots_adjust(bottom=0.28)  # increase bottom margin to fit both text box and legend
         
         
-       	#Save figure
-       	os.makedirs(output_folder, exist_ok=True)
-       	out_path = os.path.join(output_folder, f"subsurface_{centerX}_{centerY}_{input_depth}m.png")
-       	fig.savefig(out_path, dpi=150, bbox_inches="tight")
-       	feedback.pushInfo(f"Figure saved to: {out_path}")
-       
+        #Save figure
+        # `out_path` was settled (and the overwrite confirmed) right after
+        # step 1. Written in one step and never loaded as a layer, so no
+        # temp-file swap is needed (unlike the other tools' outputs).
+        os.makedirs(output_folder, exist_ok=True)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)  # pyplot keeps every figure alive otherwise -- one per run
+        feedback.pushInfo(f"Figure saved to: {out_path}")
+
+        # Step 6: Optionally overwrite soil.thermal_conductivity in a
+        # settings file with the center-point result (tc_depthavg) -- not
+        # the spatial-sensitivity offset points, which are for reporting only.
+        if settings_path:
+            if not update_thermal_conductivity:
+                feedback.pushInfo(
+                    "Settings file given but 'Overwrite soil.thermal_conductivity' "
+                    "is unchecked -- leaving it untouched."
+                )
+            elif tc_depthavg is None:
+                raise QgsProcessingException(
+                    "Can't update the settings file: no ground thermal "
+                    "conductivity could be computed at the AOI's center point."
+                )
+            else:
+                feedback.pushInfo("Updating settings file...")
+                try:
+                    settings = load_settings(settings_path)
+                except (FileNotFoundError, ValueError) as exc:
+                    raise QgsProcessingException(str(exc))
+                if "soil" not in settings:
+                    raise QgsProcessingException(
+                        "Settings file has no 'soil' block to update."
+                    )
+                try:
+                    update_settings_fields(
+                        settings_path, {"soil": {"thermal_conductivity": tc_depthavg}}
+                    )
+                except ValueError as exc:
+                    raise QgsProcessingException(str(exc))
+                feedback.pushInfo(
+                    f"soil.thermal_conductivity updated to {tc_depthavg:.2f} W/m/K "
+                    f"in {settings_path}"
+                )
+
         return {}
 
 
@@ -436,55 +549,6 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         for spine in ax.spines.values():
             spine.set_visible(True)
             spine.set_linewidth(0.6)
-        
-    def calculate_tc_internal(self, centerX, centerY, input_depth, feedback=None):
-        """Fetch API data and calculate weighted average thermal conductivity for a single point."""
-        
-        base_url = "https://data.geus.dk/geusmapmore/termiskejordarter/indexapimodel.jsp"
-        params   = {"x": centerX, "y": centerY}
-        
-        response = rq.get(base_url, params=params)
-        
-        if response.status_code != 200:
-            if feedback:
-                feedback.pushInfo(f"  Request failed for X={centerX}, Y={centerY}: status {response.status_code}")
-            return None
-        
-        data = response.json()
-        
-        if "error" in data:
-            if feedback:
-                feedback.pushInfo(f"  API error for X={centerX}, Y={centerY}: {data['error']}")
-            return None
-        
-        if input_depth == 150:
-            return data["tc_avg_0m_150m"]
-        
-        layers = data["layers"]
-        
-        tc_weighted_sum = 0
-        total_thickness = 0
-    
-        for layer in layers:
-            layer_top    = layer["top"]
-            layer_bottom = layer["bottom"]
-    
-            if layer_bottom <= 0 or layer_top >= input_depth:
-                continue
-    
-            clipped_top    = max(layer_top,    0)
-            clipped_bottom = min(layer_bottom, input_depth)
-    
-            thickness_within_depth = clipped_bottom - clipped_top
-    
-            if thickness_within_depth > 0:
-                tc_weighted_sum += layer["tc_corrected_for_phreatic"] * thickness_within_depth
-                total_thickness += thickness_within_depth
-    
-        if total_thickness > 0:
-            return tc_weighted_sum / total_thickness
-        else:
-            return None
 
     def name(self):
         """
@@ -518,7 +582,7 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         contain lowercase alphanumeric characters only and no spaces or other
         formatting characters.
         """
-        return '2. Thermonet'
+        return '3. Dimensioning'
 
     def flags(self):
         # matplotlib plotting isn't thread-safe in a Qt app; force this
@@ -538,11 +602,17 @@ class GetGroundConductivityAlgorithm(QgsProcessingAlgorithm):
         """
         return (
             "<p><b> This tool: </b> <p>"
-            "<p> 1.Calculates the ground thermal conductivity at the input AOI: polygon"
-            " centroid, line center, or point - averaged to the input depth. <p> "
+            "<p> 1. Calculates the ground thermal conductivity at the input layer's "
+            "combined centroid (a single AOI polygon's centroid, or the centroid of "
+            "every feature in a 'Source Placement' borefield/trench layer) - averaged "
+            "to the input depth. <p> "
             "<p> 2. Creates a report of the ground thermal conductivity based on"
             " the local geology and water content, and provides spatial and depth sensitivity "
             "estimates. The report is saved to the selected folder (png). "
+            "<p> 3. Optionally overwrites soil.thermal_conductivity in a project's "
+            "settings file (created/edited with the 'Dimensioning Settings' tool) "
+            "with the center-point result -- the deep/bulk value BHE dimensioning "
+            "uses. Leave the settings file empty to just get the report, as before. <p>"
             "<p> Data on ground water table and local geology is"
             " retrieved by an API call to the tool developed by GEUS (REFERENCE). <p> "
                )
