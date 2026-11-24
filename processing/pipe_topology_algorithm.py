@@ -124,46 +124,13 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             
         ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
         default_projected_crs = QgsCoordinateReferenceSystem("EPSG:3857")
-        
-        # Helper: check if CRS is geographic (i.e., degrees)
-        def is_geographic(crs):
-            return crs.isGeographic()
-        
-        # Use the projected CRS of the input if it's already projected
-        if is_geographic(pipes_layer.crs()):
-            feedback.pushInfo(f"Pipes layer is in geographic CRS ({pipes_layer.crs().authid()}), reprojecting to {default_projected_crs.authid()}")
-            pipes_layer_proj = processing.run(
-                "native:reprojectlayer",
-                {
-                    'INPUT': pipes_layer,
-                    'TARGET_CRS': default_projected_crs,
-                    'OUTPUT': 'memory:'
-                },
-                context=context,
-                feedback=feedback
-            )['OUTPUT']
-        else:
-            feedback.pushInfo(f"Pipes layer is already projected: {pipes_layer.crs().authid()}")
-            pipes_layer_proj = pipes_layer
-        
-        # Do the same for source layer
-        if is_geographic(service_pipes_layer.crs()):
-            feedback.pushInfo(f"Source layer is in geographic CRS ({service_pipes_layer.crs().authid()}), reprojecting to {pipes_layer_proj.crs().authid()}")
-            service_pipes_layer_proj = processing.run(
-                "native:reprojectlayer",
-                {
-                    'INPUT': service_pipes_layer,
-                    'TARGET_CRS': pipes_layer_proj.crs(),  # ensure it matches pipes
-                    'OUTPUT': 'memory:'
-                },
-                context=context,
-                feedback=feedback
-            )['OUTPUT']
-        else:
-            feedback.pushInfo(f"Source layer is already projected: {service_pipes_layer.crs().authid()}")
-            service_pipes_layer_proj = service_pipes_layer
 
-            
+        pipes_layer_proj = self._reproject_if_geographic(
+            pipes_layer, "Pipes layer", default_projected_crs, context, feedback
+        )
+        service_pipes_layer_proj = self._reproject_if_geographic(
+            service_pipes_layer, "Source layer", pipes_layer_proj.crs(), context, feedback
+        )
             
         # Define the fields for the output layer
         feedback.pushInfo("Creating the new fields ...")
@@ -284,7 +251,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         for pipe_feature in pipes_layer_proj.getFeatures(request):
             current_level = pipe_feature["Level"]
             feedback.pushInfo(f"Processing pipe with Level: {current_level}")
-
+            
             pipeNo += 1
             new_feature = QgsFeature(fields)
             new_feature.setGeometry(pipe_feature.geometry())
@@ -399,6 +366,26 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             "DAT_OUTPUT": dat_output_path,
         }
         
+    def _reproject_if_geographic(self, layer, label, target_crs, context, feedback):
+        if not layer.crs().isGeographic():
+            feedback.pushInfo(f"{label} is already projected: {layer.crs().authid()}")
+            return layer
+
+        feedback.pushInfo(
+            f"{label} is in geographic CRS ({layer.crs().authid()}), "
+            f"reprojecting to {target_crs.authid()}"
+        )
+        return processing.run(
+            "native:reprojectlayer",
+            {
+                'INPUT': layer,
+                'TARGET_CRS': target_crs,
+                'OUTPUT': 'memory:',
+            },
+            context=context,
+            feedback=feedback,
+        )['OUTPUT']
+
     def find_features_within_distance(self, input_feature, reference_layer, distance):
         """
         Find all features in the reference layer that are within a given distance
