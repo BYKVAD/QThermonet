@@ -324,14 +324,28 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         transformed_provider.addAttributes(new_fields)
         transformed_layer.updateFields()
 
+        # Lookup is lowercased on both sides: BBR stores UUIDs lowercase and
+        # the bbr_v001:bygning_current CQL IN filter is case-sensitive, so
+        # we normalise to the stored form.
+        join_miss_examples = []
         for feature in transformed_layer.getFeatures():
-            attrs = bbr_attributes_by_uuid.get(feature["BBRUUID"], {})
+            key = feature["BBRUUID"].lower() if feature["BBRUUID"] else None
+            attrs = bbr_attributes_by_uuid.get(key, {})
+            if not attrs and feature["BBRUUID"] and len(join_miss_examples) < 5:
+                join_miss_examples.append(feature["BBRUUID"])
             feature.setAttribute("BuildYear", attrs.get("BuildYear", 0))
             feature.setAttribute("BuildCode", attrs.get("BuildCode", 0))
             feature.setAttribute("BBRArea", attrs.get("BBRArea", 0))
             feature.setAttribute("BuildHeat", attrs.get("BuildHeat", 0))
             feature.setAttribute("FuelType", attrs.get("FuelType", 0))
             transformed_layer.updateFeature(feature)
+
+        if join_miss_examples:
+            feedback.reportError(
+                f"{len(join_miss_examples)}+ building(s) had a non-null BBRUUID "
+                f"but no matching BBR record. Their five BBR fields will be 0. "
+                f"Example UUIDs: {join_miss_examples}"
+            )
 
         transformed_layer.commitChanges()
 
@@ -607,7 +621,22 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
         if not any(layer.getFeatures()):
             raise QgsProcessingException("No buildings found within the AOI!")
 
-        uuids = [feature["BBRUUID"] for feature in layer.getFeatures() if feature["BBRUUID"]]
+        # Collect BBRUUIDs, lowercased: BBR stores them lowercase and the
+        # bbr_v001:bygning_current CQL IN filter is case-sensitive, so
+        # uppercase requests (what GeoDK returns) silently miss every record.
+        uuids = []
+        null_bbruuid_fids = []
+        for feature in layer.getFeatures():
+            if feature["BBRUUID"]:
+                uuids.append(feature["BBRUUID"].lower())
+            else:
+                null_bbruuid_fids.append(feature.id())
+        if null_bbruuid_fids:
+            feedback.reportError(
+                f"{len(null_bbruuid_fids)} building(s) have NULL/empty BBRUUID "
+                f"(fids: {null_bbruuid_fids[:5]}...) and will be skipped by the "
+                f"BBR fetch, resulting in all five BBR fields set to 0."
+            )
         unique_uuids = list(dict.fromkeys(uuids))
         if not unique_uuids:
             return {}
@@ -645,7 +674,24 @@ class GetBuildingsAndBBRAlgorithm(QgsProcessingAlgorithm):
                     f"{str(e).replace(api_key, '<REDACTED>')}"
                 )
 
-            for wfs_feature in data.get("features", []):
+            # Soft warning if the server didn't return all requested records.
+            # With the case normalisation above this should be rare; when it
+            # fires, the specific UUID(s) really are absent from BBR.
+            returned_features = data.get("features", [])
+            returned_uuids = {
+                f.get("properties", {}).get("id_lokalId") for f in returned_features
+            }
+            returned_uuids.discard(None)
+            missing_in_response = [u for u in batch_uuids if u not in returned_uuids]
+            if missing_in_response:
+                feedback.reportError(
+                    f"BBR batch {batch_index + 1}/{len(batches)} requested "
+                    f"{len(batch_uuids)}, got {len(returned_uuids)} back -- "
+                    f"{len(missing_in_response)} BBRUUID(s) had no BBR record. "
+                    f"First few: {missing_in_response[:5]}"
+                )
+
+            for wfs_feature in returned_features:
                 properties = wfs_feature.get("properties", {})
                 uuid = properties.get("id_lokalId")
                 if not uuid:

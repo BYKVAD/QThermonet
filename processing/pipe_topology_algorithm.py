@@ -434,39 +434,12 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         ## Step 0: Re-project layers if necessarty (units should be meters for algorithm to work)
         default_projected_crs = QgsCoordinateReferenceSystem(utils.project_crs_choice())
 
-        # Use the input's own CRS if it's metric (not degrees, not EPSG:3857)
-        if utils.needs_metric_reprojection(pipes_layer.crs()):
-            feedback.pushInfo(f"Pipes layer is not in metres ({pipes_layer.crs().authid()}), reprojecting to {default_projected_crs.authid()}")
-            pipes_layer_proj = processing.run(
-                "native:reprojectlayer",
-                {
-                    'INPUT': pipes_layer,
-                    'TARGET_CRS': default_projected_crs,
-                    'OUTPUT': 'memory:'
-                },
-                context=context,
-                feedback=feedback
-            )['OUTPUT']
-        else:
-            feedback.pushInfo(f"Pipes layer is already projected: {pipes_layer.crs().authid()}")
-            pipes_layer_proj = pipes_layer
-        
-        # Do the same for source layer
-        if utils.needs_metric_reprojection(service_pipes_layer.crs()):
-            feedback.pushInfo(f"Service pipes layer is not in metres ({service_pipes_layer.crs().authid()}), reprojecting to {pipes_layer_proj.crs().authid()}")
-            service_pipes_layer_proj = processing.run(
-                "native:reprojectlayer",
-                {
-                    'INPUT': service_pipes_layer,
-                    'TARGET_CRS': pipes_layer_proj.crs(),  # ensure it matches pipes
-                    'OUTPUT': 'memory:'
-                },
-                context=context,
-                feedback=feedback
-            )['OUTPUT']
-        else:
-            feedback.pushInfo(f"Source layer is already projected: {service_pipes_layer.crs().authid()}")
-            service_pipes_layer_proj = service_pipes_layer
+        pipes_layer_proj = self._reproject_if_not_metric(
+            pipes_layer, "Pipes layer", default_projected_crs, context, feedback
+        )
+        service_pipes_layer_proj = self._reproject_if_not_metric(
+            service_pipes_layer, "Service pipes layer", pipes_layer_proj.crs(), context, feedback
+        )
 
         # ...then a final check catches the remaining case: both already
         # projected (so neither branch above ran), but in two different
@@ -614,7 +587,7 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
         for pipe_feature in pipes_layer_proj.getFeatures(request):
             current_level = pipe_feature["Level"]
             feedback.pushInfo(f"Processing pipe with Level: {current_level}")
-
+            
             pipeNo += 1
             new_feature = QgsFeature(fields)
             new_feature.setGeometry(pipe_feature.geometry())
@@ -729,7 +702,29 @@ class PipeTopologyAlgorithm(QgsProcessingAlgorithm):
             dat_file.writelines(dat_lines)
 
         feedback.pushInfo("Processing completed successfully.")
+
         
+    def _reproject_if_not_metric(self, layer, label, target_crs, context, feedback):
+        if not utils.needs_metric_reprojection(layer.crs()):
+            feedback.pushInfo(f"{label} is already projected: {layer.crs().authid()}")
+            return layer
+
+        feedback.pushInfo(
+            f"{label} is not in metres ({layer.crs().authid()}), "
+            f"reprojecting to {target_crs.authid()}"
+        )
+        return processing.run(
+            "native:reprojectlayer",
+            {
+                'INPUT': layer,
+                'TARGET_CRS': target_crs,
+                'OUTPUT': 'memory:',
+            },
+            context=context,
+            feedback=feedback,
+        )['OUTPUT']
+
+    
     def _crop_pipes(
         self, parameters, context, feedback, pipes_layer, service_pipes_layer, distance_area, cropped_mains_path=None
     ):

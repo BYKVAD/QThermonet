@@ -53,7 +53,7 @@ from qgis.core import (
     QgsVectorFileWriter,
     QgsVectorLayer
 )
-from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QIcon
 from qgis import processing
 import os
@@ -127,12 +127,14 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         param.setHelp(
             "The input layer must:\n"
             "- Be a polygon layer (e.g., representing building footprints).\n"
-            "- Contain the required fields: 'Thermonet' and 'BBRUUID'.\n"
+            "- Contain the required fields: 'Thermonet' and 'id_lokalId'.\n"
+            "- Optionally contain 'YrHeatLoad', 'WiHeatLoad', 'DyHeatLoad' "
+            "(passed through to the output when present).\n"
             "- Any CRS works; a projected CRS in metres (e.g. EPSG:25832) is recommended."
         )
 
         self.addParameter(param)
-       
+
         # 2nd input
         param = QgsProcessingParameterVectorLayer(
             self.PIPES_LAYER,
@@ -161,8 +163,9 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             )
         param.setHelp(
             "The output layer will contain the shortest distance service pipes "
-            "between each building and the nearest point on the nearest pipe. \n"
-            "- It will contain all fields from both input layers.\n"
+            "between each building and the nearest point on the nearest pipe.\n"
+            "- It has a fixed schema: 'id_lokalId', 'Thermonet', 'YrHeatLoad', "
+            "'WiHeatLoad', 'DyHeatLoad', 'ellip_length'.\n"
             "- It is an essential input to the 'Pipe Topology' tool."
             )
         self.addParameter(param)
@@ -230,29 +233,12 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         # Each layer independently escapes a non-metric CRS (degrees or
         # EPSG:3857) first (both towards the same target, so they naturally
         # agree afterwards)...
-        if utils.needs_metric_reprojection(buildings_layer.crs()):
-            feedback.pushInfo(
-                f"Buildings layer is not in metres ({buildings_layer.crs().authid()}), "
-                f"reprojecting to {default_projected_crs.authid()}"
-            )
-            buildings_layer = processing.run(
-                "native:reprojectlayer",
-                {'INPUT': buildings_layer, 'TARGET_CRS': default_projected_crs, 'OUTPUT': 'memory:'},
-                context=context,
-                feedback=feedback,
-            )['OUTPUT']
-
-        if utils.needs_metric_reprojection(pipes_layer.crs()):
-            feedback.pushInfo(
-                f"Pipes layer is not in metres ({pipes_layer.crs().authid()}), "
-                f"reprojecting to {default_projected_crs.authid()}"
-            )
-            pipes_layer = processing.run(
-                "native:reprojectlayer",
-                {'INPUT': pipes_layer, 'TARGET_CRS': default_projected_crs, 'OUTPUT': 'memory:'},
-                context=context,
-                feedback=feedback,
-            )['OUTPUT']
+        buildings_layer = self._reproject_if_not_metric(
+            buildings_layer, "Buildings layer", default_projected_crs, context, feedback
+        )
+        pipes_layer = self._reproject_if_not_metric(
+            pipes_layer, "Pipes layer", default_projected_crs, context, feedback
+        )
 
         # ...then a final check catches the remaining case: both were
         # already projected (so neither branch above ran), but in two
@@ -270,9 +256,25 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
                 feedback=feedback,
             )['OUTPUT']
 
-        # Ensure the "Thermonet" field exists in the buildings layer
-        if "Thermonet" not in [field.name() for field in buildings_layer.fields()]:
-            raise QgsProcessingException("The source layer does not contain a 'Thermonet' field!")
+        # Validate required fields on inputs up front so we fail before the
+        # processing loop rather than crashing deep inside feature iteration.
+        building_field_names = [field.name() for field in buildings_layer.fields()]
+        pipe_field_names = [field.name() for field in pipes_layer.fields()]
+
+        required_building_fields = ["Thermonet", "id_lokalId"]
+        missing_building_fields = [
+            f for f in required_building_fields if f not in building_field_names
+        ]
+        if missing_building_fields:
+            raise QgsProcessingException(
+                "The buildings layer is missing required field(s): "
+                f"{', '.join(missing_building_fields)}."
+            )
+
+        has_yr = "YrHeatLoad" in building_field_names
+        has_wi = "WiHeatLoad" in building_field_names
+        has_dy = "DyHeatLoad" in building_field_names
+        has_ellip = "ellip_length" in pipe_field_names
     
         # Filter buildings with Thermonet = "Yes"
         buildings = [
@@ -287,24 +289,21 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         # Prepare output fields
         feedback.pushInfo("Preparing output fields ...")
 
-        output_fields = QgsFields()
-        for field in buildings_layer.fields():
-            if field.name() == "YrHeatLoad":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 0))
-            elif field.name() == "WiHeatLoad":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 0))
-            elif field.name() == "DyHeatLoad":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 0))
-            else:
-                # Use default type/length/precision from input
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision()))
+        # Fixed schema: deterministic across runs regardless of what extra
+        # columns the inputs happen to carry. Downstream consumers only need
+        # 'id_lokalId'; the rest are user-facing / inspection fields.
+        field_definitions = [
+            ("id_lokalId",   QMetaType.Type.QString, 255, 0),
+            ("Thermonet",    QMetaType.Type.QString, 10,  0),
+            ("YrHeatLoad",   QMetaType.Type.Double,  10,  0),
+            ("WiHeatLoad",   QMetaType.Type.Double,  10,  0),
+            ("DyHeatLoad",   QMetaType.Type.Double,  10,  0),
+            ("ellip_length", QMetaType.Type.Double,  10,  1),
+        ]
 
-        for field in pipes_layer.fields():
-            if field.name() == "ellip_length":
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), 10, 1))
-            else:
-                # Use default type/length/precision from input
-                output_fields.append(QgsField(field.name(), field.type(), field.typeName(), field.length(), field.precision()))
+        output_fields = QgsFields()
+        for field_name, field_type, field_length, field_precision in field_definitions:
+            output_fields.append(QgsField(field_name, field_type, len=field_length, prec=field_precision))
                                   
         # Accumulate output features in memory, then write them out with
         # writeAsVectorFormatV3 at the end - QgsProcessingParameterFeatureSink's
@@ -377,9 +376,12 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
         
             new_feature = QgsFeature(output_fields)
             new_feature.setGeometry(QgsGeometry.fromPolylineXY([start_point, end_point]))
-            new_feature.setAttributes(
-                building.attributes() + closest_pipe_feature.attributes()
-            )
+            new_feature["id_lokalId"]   = building["id_lokalId"]
+            new_feature["Thermonet"]    = building["Thermonet"]
+            new_feature["YrHeatLoad"]   = building["YrHeatLoad"]           if has_yr    else None
+            new_feature["WiHeatLoad"]   = building["WiHeatLoad"]           if has_wi    else None
+            new_feature["DyHeatLoad"]   = building["DyHeatLoad"]           if has_dy    else None
+            new_feature["ellip_length"] = closest_pipe_feature["ellip_length"] if has_ellip else None
             new_features.append(new_feature)
 
         accumulator_provider.addFeatures(new_features)
@@ -401,8 +403,24 @@ class ServicePipesAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(f"Failed to write output layer. Error: {error}")
 
         feedback.pushInfo("Processing completed.")
-    
-            
+
+
+    def _reproject_if_not_metric(self, layer, label, target_crs, context, feedback):
+        if not utils.needs_metric_reprojection(layer.crs()):
+            return layer
+
+        feedback.pushInfo(
+            f"{label} is not in metres ({layer.crs().authid()}), "
+            f"reprojecting to {target_crs.authid()}"
+        )
+        return processing.run(
+            "native:reprojectlayer",
+            {'INPUT': layer, 'TARGET_CRS': target_crs, 'OUTPUT': 'memory:'},
+            context=context,
+            feedback=feedback,
+        )['OUTPUT']
+
+
     def calculate_distance_between_geometries(self, building_geom, pipe_geom, distance_calculator, feedback):
         """
         Calculate the shortest distance between the nearest point on the building and the nearest point on the pipe.
